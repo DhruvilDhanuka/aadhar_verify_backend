@@ -30,7 +30,8 @@ app = FastAPI(
 # Allow React dev server (localhost:5173) to call the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["https://aadhar-verify-frontend.vercel.app/",
+                   "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["POST"],
     allow_headers=["*"],
 )
@@ -115,7 +116,8 @@ def open_pdf_document(pdf_path: str, passwords: list[str]) -> pdfium.PdfDocument
         except Exception:
             continue
 
-    raise HTTPException(status_code=400, detail="Unable to open or decrypt the PDF document.")
+    raise HTTPException(
+        status_code=400, detail="Unable to open or decrypt the PDF document.")
 
 
 @app.post("/api/verify")
@@ -144,7 +146,8 @@ async def verify(
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     if len(file_bytes) > 5 * 1024 * 1024:  # 5 MB limit
-        raise HTTPException(status_code=400, detail="File too large. Max 5 MB.")
+        raise HTTPException(
+            status_code=400, detail="File too large. Max 5 MB.")
 
     tmp_pdf = None
     tmp_img = None
@@ -158,7 +161,8 @@ async def verify(
         tmp_pdf.close()
 
         # ── Step 1: Verify UIDAI digital signature ────────────────────────
-        passwords = get_aadhaar_pdf_passwords(expected_name.strip(), expected_dob.strip())
+        passwords = get_aadhaar_pdf_passwords(
+            expected_name.strip(), expected_dob.strip())
         if not signed_by_uidai(file_bytes, passwords):
             raise HTTPException(status_code=400, detail=(
                 "PDF is not signed by UIDAI. Only genuine Aadhaar PDFs from "
@@ -170,10 +174,11 @@ async def verify(
             pdf_path=tmp_pdf.name,
             passwords=passwords,
         )
-        
+
         try:
             if len(pdf_doc) == 0:
-                raise HTTPException(status_code=400, detail="PDF has no pages.")
+                raise HTTPException(
+                    status_code=400, detail="PDF has no pages.")
             bitmap = pdf_doc[0].render(scale=200 / 72, rotation=0)
             pil_image = bitmap.to_pil()
             pil_image.save(tmp_img.name, format="PNG")
@@ -189,7 +194,8 @@ async def verify(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Verification failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Verification failed: {e}")
     finally:
         # Zero-retention: delete temporary files
         for f in (tmp_pdf, tmp_img):
