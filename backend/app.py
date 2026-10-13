@@ -30,7 +30,7 @@ app = FastAPI(
 # Allow React dev server (localhost:5173) to call the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://aadhar-verify-frontend-r2l4c7tf3-dhruvil-codes.vercel.app",
+    allow_origins=["https://aadhar-verify-frontend-r2l4c7tf3-dhruvil-codes.vercel.app", "https://aadhar-verify-frontend.vercel.app",
                    "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["POST"],
     allow_headers=["*"],
