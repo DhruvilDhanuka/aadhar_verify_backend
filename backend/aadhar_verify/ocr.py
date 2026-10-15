@@ -14,9 +14,9 @@ import cv2
 import pytesseract
 
 # Configure Tesseract path on Windows
-# TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# if os.path.exists(TESSERACT_EXE):
-#     pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
+TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if os.path.exists(TESSERACT_EXE):
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
 
 DOB_RE_f1 = re.compile(r"\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b")
 DOB_RE_f2 = re.compile(r"\b((?:19|20)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")

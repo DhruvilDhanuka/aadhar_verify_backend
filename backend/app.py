@@ -6,6 +6,8 @@ is rendered to an in-memory PNG, processed, and all temp files are
 immediately deleted. No PII is logged or persisted.
 """
 from __future__ import annotations
+import shutil
+
 
 import tempfile
 import os
@@ -210,4 +212,8 @@ async def verify(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "ok",
+        "tesseract": shutil.which("tesseract") is not None,
+        "timestamp": datetime.now().isoformat(),
+    }
