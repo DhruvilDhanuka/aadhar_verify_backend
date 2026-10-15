@@ -181,7 +181,7 @@ async def verify(
             if len(pdf_doc) == 0:
                 raise HTTPException(
                     status_code=400, detail="PDF has no pages.")
-            bitmap = pdf_doc[0].render(scale=150 / 72, rotation=0)
+            bitmap = pdf_doc[0].render(scale=160/ 72, rotation=0)
             pil_image = bitmap.to_pil()
             pil_image.save(tmp_img.name, format="PNG")
         finally:

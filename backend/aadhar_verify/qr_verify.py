@@ -106,10 +106,14 @@ def _parse_old_xml_qr(payload: str) -> dict:
     for xml_attr, field_name in _XML_ATTR_MAP.items():
         val = root.get(xml_attr)
         if val is not None and field_name not in data:
-            data[field_name] = val.strip()
+            stripped = val.strip()
+            data[field_name] = stripped if stripped else None
 
-    if "dob" not in data and "yob" in data:
+    if not data.get("dob") and data.get("yob"):
         data["dob"] = data["yob"]
+
+    data.setdefault("name", None)
+    data.setdefault("dob", None)
 
     return data
 
@@ -135,17 +139,21 @@ def _decode_secure_qr(numeric_payload: str) -> dict:
     for i in range(n):
         start = delimiters[i] + 1
         end = delimiters[i + 1]
-        data[field_names[i]] = decompressed[start:end].decode("ISO-8859-1", errors="replace")
+        raw_val = decompressed[start:end].decode("ISO-8859-1", errors="replace").strip()
+        data[field_names[i]] = raw_val if raw_val else None
 
-    ref = data.get("referenceid", "")
+    ref = data.get("referenceid") or ""
     data["aadhaar_last_4_digit"] = ref[:4] if len(ref) >= 4 else ref
 
     try:
-        status = int(data.get("email_mobile_status", "0"))
+        status = int(data.get("email_mobile_status") or 0)
     except ValueError:
         status = 0
     data["email"] = status in {1, 3}
     data["mobile"] = status in {2, 3}
+
+    data.setdefault("name", None)
+    data.setdefault("dob", None)
 
     return data
 

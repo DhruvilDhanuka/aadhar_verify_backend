@@ -40,31 +40,54 @@ def run_pipeline(
             reg_ocr_match=False,
         )
 
-    # Step 2: Attempt to decode QR and extract card OCR
+    # Step 2: Attempt to decode QR first
     qr_result = check_qr(image_path)
-    ocr_result = extract_ocr(image_path)
+    ocr_result = None
 
-    # ── PATH A: Primary Verification via QR Demographics ─────────────────
+    # Extract demographic fields if QR is decoded
+    qr_name = None
+    qr_dob = None
     if qr_result.decoded:
         qr_fields = qr_result.fields or {}
-        qr_name = qr_fields.get("name")
-        qr_dob = qr_fields.get("dob") or qr_fields.get("yob")
+        raw_name = qr_fields.get("name")
+        qr_name = raw_name.strip() if raw_name and raw_name.strip() else None
 
-        # Name Match
-        name_match = (
-            exp_name.lower() in (qr_name or "").lower()
-            or (qr_name or "").lower() in exp_name.lower()
-            or fuzzy_match_name(exp_name, qr_name or "")
-        )
+        raw_dob = qr_fields.get("dob") or qr_fields.get("yob")
+        qr_dob = raw_dob.strip() if raw_dob and raw_dob.strip() else None
 
-        # DOB Match: Check QR first; if absent or mismatch in QR, check printed card OCR text
-        dob_matched_via_ocr = False
-        if qr_dob and dobs_match(exp_dob, qr_dob):
-            dob_match = True
+    # Run OCR ONLY if QR was unreadable OR if either name or DOB is missing (None) from QR
+    needs_ocr = (not qr_result.decoded) or (qr_name is None) or (qr_dob is None)
+    if needs_ocr:
+        ocr_result = extract_ocr(image_path)
+
+    # ?? PATH A: Primary Verification via QR Demographics ??????????????????
+    if qr_result.decoded:
+        # 1. Name Match
+        name_matched_via_ocr = False
+        if qr_name is not None:
+            name_match = (
+                exp_name.lower() in qr_name.lower()
+                or qr_name.lower() in exp_name.lower()
+                or fuzzy_match_name(exp_name, qr_name)
+            )
         else:
-            ocr_dob_matches = (
-                (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
-                or match_dob(exp_dob, ocr_result.text)
+            name_matched_via_ocr = bool(
+                ocr_result and ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text)
+            )
+            name_match = name_matched_via_ocr
+
+        # 2. DOB Match
+        # If QR date of birth is found: check match directly; if not matching, dobs_match is False!
+        # Do OCR fallback for DOB ONLY if QR DOB was not found (None).
+        dob_matched_via_ocr = False
+        if qr_dob is not None:
+            dob_match = dobs_match(exp_dob, qr_dob)
+        else:
+            ocr_dob_matches = bool(
+                ocr_result and (
+                    (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
+                    or match_dob(exp_dob, ocr_result.text)
+                )
             )
             if ocr_dob_matches:
                 dob_match = True
@@ -72,15 +95,34 @@ def run_pipeline(
             else:
                 dob_match = False
 
-        # Visual OCR cross-check (informative)
-        qr_ocr_match = fuzzy_match_name(qr_name, ocr_result.text) if (qr_name and ocr_result.text) else True
+        # Visual OCR cross-checks (only if OCR was performed)
+        qr_ocr_match = None
+        reg_ocr_match = None
+        if ocr_result and ocr_result.text:
+            if qr_name:
+                qr_ocr_match = fuzzy_match_name(qr_name, ocr_result.text)
+            reg_ocr_match = fuzzy_match_name(exp_name, ocr_result.text)
+
+        # Registration vs QR match flag
+        if qr_name is not None and qr_dob is not None:
+            reg_qr_match = name_match and dob_match
+        elif qr_name is not None:
+            reg_qr_match = name_match
+        elif qr_dob is not None:
+            reg_qr_match = dob_match
+        else:
+            reg_qr_match = False
 
         if name_match and dob_match:
-            reason = (
-                "Verification successful: QR code verified (Date of Birth verified via printed card text)."
-                if dob_matched_via_ocr
-                else "Verification successful: Identity verified against official UIDAI QR code in signed document."
-            )
+            if dob_matched_via_ocr and name_matched_via_ocr:
+                reason = "Verification successful: QR code verified (Name and Date of Birth verified via printed card text)."
+            elif dob_matched_via_ocr:
+                reason = "Verification successful: QR code verified (Date of Birth verified via printed card text)."
+            elif name_matched_via_ocr:
+                reason = "Verification successful: QR code verified (Name verified via printed card text)."
+            else:
+                reason = "Verification successful: Identity verified against official UIDAI QR code in signed document."
+
             return _build_response(
                 verdict="PASS",
                 verdict_reason=reason,
@@ -90,9 +132,9 @@ def run_pipeline(
                 exp_dob=exp_dob,
                 qr_result=qr_result,
                 ocr_result=ocr_result,
-                reg_qr_match=True,
+                reg_qr_match=reg_qr_match,
                 qr_ocr_match=qr_ocr_match,
-                reg_ocr_match=True,
+                reg_ocr_match=reg_ocr_match,
             )
         else:
             mismatches = []
@@ -113,17 +155,23 @@ def run_pipeline(
                 exp_dob=exp_dob,
                 qr_result=qr_result,
                 ocr_result=ocr_result,
-                reg_qr_match=False,
+                reg_qr_match=reg_qr_match,
                 qr_ocr_match=qr_ocr_match,
-                reg_ocr_match=False,
+                reg_ocr_match=reg_ocr_match,
             )
 
-    # ── PATH B: Fallback Verification via Printed Card OCR ───────────────
+    # ?? PATH B: Fallback Verification via Printed Card OCR ??????????????????
     # (Triggered when QR is missing or unreadable in an authentic signed PDF)
-    ocr_name_match = fuzzy_match_name(exp_name, ocr_result.text) if ocr_result.text else False
-    ocr_dob_match = (
-        (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
-        or match_dob(exp_dob, ocr_result.text)
+    ocr_name_match = (
+        fuzzy_match_name(exp_name, ocr_result.text)
+        if (ocr_result and ocr_result.text)
+        else False
+    )
+    ocr_dob_match = bool(
+        ocr_result and (
+            (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
+            or match_dob(exp_dob, ocr_result.text)
+        )
     )
 
     if ocr_name_match and ocr_dob_match:
@@ -199,7 +247,7 @@ def _build_response(
                 or qr_result.fields.get("aadhaar_last_4_digit")
             ) if (qr_result and qr_result.decoded) else None,
         },
-        "ocr_data": ocr_result.to_dict() if ocr_result else {},
+        "ocr_data": ocr_result.to_dict() if ocr_result else None,
         "cross_checks": {
             "registration_vs_qr": reg_qr_match,
             "qr_vs_card_text": qr_ocr_match,
