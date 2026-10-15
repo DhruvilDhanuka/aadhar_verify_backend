@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import cv2
+import numpy as np
 import pytesseract
 
 # Configure Tesseract path on Windows
@@ -70,9 +71,12 @@ class OcrResult:
         }
 
 
-def extract_ocr(image_path: str) -> OcrResult:
-    """Run OCR on the rendered page and extract text and DOB."""
-    raw = cv2.imread(image_path)
+def extract_ocr(image: str | np.ndarray) -> OcrResult:
+    """Run OCR on the rendered page and extract text and DOB. Accepts file path or in-memory NumPy array."""
+    if isinstance(image, np.ndarray):
+        raw = image
+    else:
+        raw = cv2.imread(image)
     if raw is None:
         return OcrResult("", None)
 

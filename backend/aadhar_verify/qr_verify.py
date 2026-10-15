@@ -4,6 +4,7 @@ from typing import Optional
 import re
 import zlib
 import cv2
+import numpy as np
 from pyzbar.pyzbar import decode as zbar_decode
 import defusedxml.ElementTree as ET
 
@@ -29,8 +30,11 @@ class QrResult:
     fields: dict
 
 
-def _locate_qr_payload(image_path: str) -> Optional[str]:
-    img = cv2.imread(image_path)
+def _locate_qr_payload(image: str | np.ndarray) -> Optional[str]:
+    if isinstance(image, np.ndarray):
+        img = image
+    else:
+        img = cv2.imread(image)
     if img is None:
         return None
 
@@ -158,9 +162,9 @@ def _decode_secure_qr(numeric_payload: str) -> dict:
     return data
 
 
-def check_qr(image_path: str) -> QrResult:
-    """Detect and decode UIDAI QR demographics from a rendered document page."""
-    qr_payload = _locate_qr_payload(image_path)
+def check_qr(image: str | np.ndarray) -> QrResult:
+    """Detect and decode UIDAI QR demographics from a rendered document page or in-memory NumPy array."""
+    qr_payload = _locate_qr_payload(image)
     if not qr_payload:
         return QrResult(decoded=False, fields={})
 

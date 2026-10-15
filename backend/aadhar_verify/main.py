@@ -7,17 +7,22 @@ Architecture:
 3. Aadhaar Printed Card Text (OCR Data Fallback)
 """
 from __future__ import annotations
+import numpy as np
 
 from .qr_verify import check_qr
 from .ocr import extract_ocr, fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy
 
 
 def run_pipeline(
-    image_path: str,
+    image: str | np.ndarray | None = None,
     expected_name: str | None = None,
     expected_dob: str | None = None,
+    image_path: str | None = None,
 ) -> dict:
-    """Run the complete Aadhaar PDF verification pipeline with QR primary and OCR fallback."""
+    """Run the complete Aadhaar PDF verification pipeline with QR primary and OCR fallback. Accepts image array or path."""
+    target_image = image if image is not None else image_path
+    if target_image is None:
+        raise ValueError("Either 'image' (np.ndarray) or 'image_path' (str) must be provided.")
     exp_name = expected_name.strip() if expected_name else None
     exp_dob = normalize_dob_to_ddmmyyyy(expected_dob.strip()) if expected_dob else None
 
@@ -41,7 +46,7 @@ def run_pipeline(
         )
 
     # Step 2: Attempt to decode QR first
-    qr_result = check_qr(image_path)
+    qr_result = check_qr(target_image)
     ocr_result = None
 
     # Extract demographic fields if QR is decoded
@@ -58,7 +63,7 @@ def run_pipeline(
     # Run OCR ONLY if QR was unreadable OR if either name or DOB is missing (None) from QR
     needs_ocr = (not qr_result.decoded) or (qr_name is None) or (qr_dob is None)
     if needs_ocr:
-        ocr_result = extract_ocr(image_path)
+        ocr_result = extract_ocr(target_image)
 
     # ?? PATH A: Primary Verification via QR Demographics ??????????????????
     if qr_result.decoded:

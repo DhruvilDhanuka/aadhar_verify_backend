@@ -95,11 +95,11 @@ def signed_by_uidai(pdf_bytes: bytes, passwords: list[str]) -> bool:
     return False
 
 
-def open_pdf_document(pdf_path: str, passwords: list[str]) -> pdfium.PdfDocument:
+def open_pdf_document(pdf_input: str | bytes, passwords: list[str]) -> pdfium.PdfDocument:
     """Open a PDF document. If password-protected, unlocks using candidate password."""
     # 1. Try opening without a password (for unencrypted / already unlocked PDFs)
     try:
-        doc = pdfium.PdfDocument(pdf_path)
+        doc = pdfium.PdfDocument(pdf_input)
         if len(doc) > 0:
             _ = doc[0]  # Verify page access
             return doc
@@ -110,7 +110,7 @@ def open_pdf_document(pdf_path: str, passwords: list[str]) -> pdfium.PdfDocument
     # 2. Open with candidate password
     for pwd in passwords:
         try:
-            doc = pdfium.PdfDocument(pdf_path, password=pwd)
+            doc = pdfium.PdfDocument(pdf_input, password=pwd)
             if len(doc) > 0:
                 _ = doc[0]  # Verify page access
                 return doc
@@ -151,18 +151,8 @@ async def verify(
         raise HTTPException(
             status_code=400, detail="File too large. Max 5 MB.")
 
-    tmp_pdf = None
-    tmp_img = None
     try:
-        tmp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        tmp_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp_img.close()
-
-        tmp_pdf.write(file_bytes)
-        tmp_pdf.flush()
-        tmp_pdf.close()
-
-        # ── Step 1: Verify UIDAI digital signature ────────────────────────
+        # Step 1: Verify UIDAI digital signature (purely in-memory)
         passwords = get_aadhaar_pdf_passwords(
             expected_name.strip(), expected_dob.strip())
         if not signed_by_uidai(file_bytes, passwords):
@@ -171,9 +161,9 @@ async def verify(
                 "UIDAI / DigiLocker / mAadhaar are accepted."
             ))
 
-        # ── Step 2: Render first page → image for QR + OCR ───────────────
+        # Step 2: Render first page directly to NumPy array in memory
         pdf_doc = open_pdf_document(
-            pdf_path=tmp_pdf.name,
+            pdf_input=file_bytes,
             passwords=passwords,
         )
 
@@ -181,15 +171,15 @@ async def verify(
             if len(pdf_doc) == 0:
                 raise HTTPException(
                     status_code=400, detail="PDF has no pages.")
-            bitmap = pdf_doc[0].render(scale=160/ 72, rotation=0)
-            pil_image = bitmap.to_pil()
-            pil_image.save(tmp_img.name, format="PNG")
+            bitmap = pdf_doc[0].render(scale=160 / 72, rotation=0)
+            # Convert directly to in-memory NumPy uint8 array (zero disk I/O)
+            image_np = bitmap.to_numpy()
         finally:
             pdf_doc.close()
 
-        # ── Step 3: QR scan + OCR pipeline ───────────────────────────────
+        # Step 3: QR scan + OCR pipeline
         result = run_pipeline(
-            image_path=tmp_img.name,
+            image=image_np,
             expected_name=expected_name.strip() or None,
             expected_dob=expected_dob.strip() or None,
         )
@@ -198,14 +188,6 @@ async def verify(
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Verification failed: {e}")
-    finally:
-        # Zero-retention: delete temporary files
-        for f in (tmp_pdf, tmp_img):
-            if f and os.path.exists(f.name):
-                try:
-                    os.unlink(f.name)
-                except OSError:
-                    pass
 
     return JSONResponse(content=result)
 
