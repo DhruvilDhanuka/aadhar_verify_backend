@@ -76,12 +76,16 @@ def extract_ocr(image_path: str) -> OcrResult:
     if raw is None:
         return OcrResult("", None)
 
-    # Perform Hindi + English OCR pass
+    # Crop to the lower card portion on portrait pages (standard e-Aadhaar A4) to optimize speed
+    h, w = raw.shape[:2]
+    ocr_target = raw[int(h * 0.45):, :] if h > w else raw
+
+    # Perform English OCR pass on the targeted card area
     try:
-        combined_text = pytesseract.image_to_string(raw, lang="hin+eng")
+        combined_text = pytesseract.image_to_string(ocr_target, lang="eng")
     except Exception:
         try:
-            combined_text = pytesseract.image_to_string(raw)
+            combined_text = pytesseract.image_to_string(ocr_target)
         except Exception:
             combined_text = ""
 
