@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from .qr_verify import check_qr
-from .ocr import extract_ocr, fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy
+from .ocr import extract_ocr, match_names, fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy, is_18_or_older
 
 
 def run_pipeline(
@@ -71,11 +71,7 @@ def run_pipeline(
         # 1. Name Match
         name_matched_via_ocr = False
         if qr_name is not None:
-            name_match = (
-                exp_name.lower() in qr_name.lower()
-                or qr_name.lower() in exp_name.lower()
-                or fuzzy_match_name(exp_name, qr_name)
-            )
+            name_match = match_names(exp_name, qr_name)
         else:
             name_matched_via_ocr = bool(
                 ocr_result and ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text)
@@ -120,6 +116,29 @@ def run_pipeline(
             reg_qr_match = False
 
         if name_match and dob_match:
+            # 18+ Verification check
+            verified_dob = (qr_dob if qr_dob and len(qr_dob.split("-")) == 3 else None) or exp_dob or qr_dob
+            is_adult, age = is_18_or_older(verified_dob)
+            if not is_adult:
+                age_str = f"{age} years old" if age is not None else "under 18"
+                return _build_response(
+                    verdict="FAIL",
+                    verdict_reason=(
+                        f"Age verification failed: Attendee is {age_str}. "
+                        "Mood Indigo registration requires attendees to be at least 18 years of age."
+                    ),
+                    reupload_required=False,
+                    reupload_message="Attendees under 18 years of age are not eligible to attend.",
+                    exp_name=exp_name,
+                    exp_dob=exp_dob,
+                    qr_result=qr_result,
+                    ocr_result=ocr_result,
+                    reg_qr_match=reg_qr_match,
+                    qr_ocr_match=qr_ocr_match,
+                    reg_ocr_match=reg_ocr_match,
+                    age=age,
+                )
+
             if dob_matched_via_ocr and name_matched_via_ocr:
                 reason = "Verification successful: QR code verified (Name and Date of Birth verified via printed card text)."
             elif dob_matched_via_ocr:
@@ -141,6 +160,7 @@ def run_pipeline(
                 reg_qr_match=reg_qr_match,
                 qr_ocr_match=qr_ocr_match,
                 reg_ocr_match=reg_ocr_match,
+                age=age,
             )
         else:
             mismatches = []
@@ -181,6 +201,29 @@ def run_pipeline(
     )
 
     if ocr_name_match and ocr_dob_match:
+        # 18+ Verification check
+        verified_dob = (ocr_result.detected_dob if ocr_result and ocr_result.detected_dob else None) or exp_dob
+        is_adult, age = is_18_or_older(verified_dob)
+        if not is_adult:
+            age_str = f"{age} years old" if age is not None else "under 18"
+            return _build_response(
+                verdict="FAIL",
+                verdict_reason=(
+                    f"Age verification failed: Attendee is {age_str}. "
+                    "Mood Indigo registration requires attendees to be at least 18 years of age."
+                ),
+                reupload_required=False,
+                reupload_message="Attendees under 18 years of age are not eligible to attend.",
+                exp_name=exp_name,
+                exp_dob=exp_dob,
+                qr_result=qr_result,
+                ocr_result=ocr_result,
+                reg_qr_match=False,
+                qr_ocr_match=None,
+                reg_ocr_match=True,
+                age=age,
+            )
+
         return _build_response(
             verdict="PASS",
             verdict_reason="Verification successful: Identity verified via printed document text (QR unreadable).",
@@ -193,6 +236,7 @@ def run_pipeline(
             reg_qr_match=False,
             qr_ocr_match=None,
             reg_ocr_match=True,
+            age=age,
         )
     else:
         mismatches = []
@@ -230,6 +274,7 @@ def _build_response(
     reg_qr_match: bool | None,
     qr_ocr_match: bool | None,
     reg_ocr_match: bool | None,
+    age: int | None = None,
 ) -> dict:
     """Build a unified JSON response structured specifically for the frontend."""
     return {
@@ -241,6 +286,7 @@ def _build_response(
         "registration_data": {
             "name": exp_name,
             "dob": exp_dob,
+            "age": age,
         },
         "qr_data": {
             "decoded": qr_result.decoded if qr_result else False,

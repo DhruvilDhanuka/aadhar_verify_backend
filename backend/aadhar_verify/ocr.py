@@ -7,6 +7,7 @@ and provides fuzzy cross-matching against registration data.
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import numpy as np
@@ -61,6 +62,45 @@ def dobs_match(dob1: str | None, dob2: str | None) -> bool:
     return False
 
 
+def calculate_age(dob_str: str | None) -> int | None:
+    """Calculate age in years from DD-MM-YYYY, YYYY-MM-DD, or YYYY string relative to today."""
+    if not dob_str:
+        return None
+
+    cleaned = dob_str.strip().replace("/", "-").replace(".", "-")
+    parts = cleaned.split("-")
+    today = date.today()
+
+    try:
+        if len(parts) == 3:
+            # YYYY-MM-DD
+            if len(parts[0]) == 4:
+                birth_date = date(int(parts[0]), int(parts[1]), int(parts[2]))
+            # DD-MM-YYYY
+            elif len(parts[2]) == 4:
+                birth_date = date(int(parts[2]), int(parts[1]), int(parts[0]))
+            else:
+                return None
+            return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+
+        # 4-digit Year of birth only (e.g. '2005')
+        if len(parts) == 1 and len(parts[0]) == 4 and parts[0].isdigit():
+            return today.year - int(parts[0])
+
+    except (ValueError, TypeError):
+        return None
+
+    return None
+
+
+def is_18_or_older(dob_str: str | None) -> tuple[bool, int | None]:
+    """Check if DOB corresponds to someone who is at least 18 years old today."""
+    age = calculate_age(dob_str)
+    if age is None:
+        return False, None
+    return age >= 18, age
+
+
 @dataclass
 class OcrResult:
     text: str
@@ -105,30 +145,127 @@ def extract_ocr(pdf_text: str | None = None, image: str | np.ndarray | None = No
     )
 
 
+COMMON_NAME_ABBREVIATIONS = {
+    "md": "mohammed",
+    "mohd": "mohammed",
+    "mohammad": "mohammed",
+    "muhammad": "mohammed",
+    "ku": "kumari",
+    "km": "kumari",
+}
+
+
+def _clean_name_tokens(name: str) -> list[str]:
+    """Clean and tokenize name into individual alphabetic words."""
+    cleaned = re.sub(r"\b(mr|ms|mrs|shri|smt|dr)\b\.?", "", name.lower())
+    tokens = []
+    for w in re.findall(r"[a-z]+", cleaned):
+        if len(w) >= 2:
+            tokens.append(COMMON_NAME_ABBREVIATIONS.get(w, w))
+    return tokens
+
+
+def _words_similar(w1: str, w2: str, threshold: float = 0.82) -> bool:
+    """Check if two individual name tokens are identical or minor typos."""
+    if w1 == w2:
+        return True
+    return SequenceMatcher(None, w1, w2).ratio() >= threshold
+
+
+def match_names(expected_name: str | None, actual_name: str | None) -> bool:
+    """
+    Robust name matcher for Aadhaar verification (Expected Name vs QR Name).
+    Prevents substring exploits (e.g. 'Raj' vs 'Rajesh', 'Singh' vs 'Vikramaditya Singh'),
+    while allowing flipped order ('Dhruvil Dhanuka' == 'Dhanuka Dhruvil'), missing middle
+    names ('Rahul Sharma' matches 'Rahul Kumar Sharma'), and minor typos / abbreviations.
+    """
+    if not expected_name or not actual_name:
+        return False
+
+    exp_clean = expected_name.strip()
+    act_clean = actual_name.strip()
+    if len(exp_clean) < 3 or len(act_clean) < 3:
+        return False
+
+    exp_tokens = _clean_name_tokens(exp_clean)
+    act_tokens = _clean_name_tokens(act_clean)
+
+    if not exp_tokens or not act_tokens:
+        return False
+
+    # 1. Exact match (normalized)
+    if " ".join(exp_tokens) == " ".join(act_tokens):
+        return True
+
+    # 2. Order-independent exact match ("Dhruvil Dhanuka" == "Dhanuka Dhruvil")
+    if sorted(exp_tokens) == sorted(act_tokens):
+        return True
+
+    # 3. Single-token registrant (e.g. "Aman")
+    # Must only match if the Aadhaar name is also a single token
+    if len(exp_tokens) == 1:
+        if len(act_tokens) == 1:
+            return _words_similar(exp_tokens[0], act_tokens[0], threshold=0.82)
+        return False
+
+    if len(act_tokens) == 1:
+        return False
+
+    # 4. Multi-token match (First name + Last name validation)
+    first_exp, last_exp = exp_tokens[0], exp_tokens[-1]
+    first_matched = any(_words_similar(first_exp, q) for q in act_tokens)
+    last_matched = any(_words_similar(last_exp, q) for q in act_tokens)
+
+    if not (first_matched and last_matched):
+        return False
+
+    # 5. Token overlap ratio check
+    matched_count = 0
+    used_act = set()
+    for e in exp_tokens:
+        for idx, q in enumerate(act_tokens):
+            if idx not in used_act and _words_similar(e, q, threshold=0.82):
+                matched_count += 1
+                used_act.add(idx)
+                break
+
+    ratio = matched_count / max(len(exp_tokens), len(act_tokens))
+    return ratio >= 0.60
+
+
 def fuzzy_match_name(expected_name: str | None, ocr_text: str) -> bool:
-    """Check if expected name matches text found in OCR using sliding window fuzzy ratio."""
+    """Check if expected name matches text found in OCR using word boundaries and sliding window fuzzy ratio."""
     if not expected_name or not ocr_text:
         return False
 
     expected_clean = expected_name.strip().lower()
     text_clean = ocr_text.lower()
 
-    # Exact token / substring check
-    if expected_clean in text_clean:
+    if len(expected_clean) < 3:
+        return False
+
+    # Exact token / whole-word check
+    if re.search(r"\b" + re.escape(expected_clean) + r"\b", text_clean):
         return True
 
-    # Token match (e.g. "Rahul", "Kumar")
+    # Token match (e.g. "Rahul", "Kumar") with word boundaries
     tokens = [t for t in expected_clean.split() if len(t) > 2]
-    if tokens and all(t in text_clean for t in tokens):
+    if tokens and all(re.search(r"\b" + re.escape(t) + r"\b", text_clean) for t in tokens):
         return True
 
     # Sliding-window SequenceMatcher (handles minor character discrepancies)
     window = len(expected_clean)
-    if window < 3 or len(text_clean) < window:
+    if len(text_clean) < window:
         return False
 
     best_ratio = 0.0
     for i in range(len(text_clean) - window + 1):
+        # Must be bounded by non-alphabetic characters (word boundaries)
+        if i > 0 and text_clean[i - 1].isalpha():
+            continue
+        if (i + window) < len(text_clean) and text_clean[i + window].isalpha():
+            continue
+
         chunk = text_clean[i : i + window]
         ratio = SequenceMatcher(None, expected_clean, chunk).ratio()
         if ratio > best_ratio:
