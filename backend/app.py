@@ -161,7 +161,7 @@ async def verify(
                 "UIDAI / DigiLocker / mAadhaar are accepted."
             ))
 
-        # Step 2: Render first page directly to NumPy array in memory
+        # Step 2: Render first page directly to NumPy array in memory and extract embedded text
         pdf_doc = open_pdf_document(
             pdf_input=file_bytes,
             passwords=passwords,
@@ -171,17 +171,38 @@ async def verify(
             if len(pdf_doc) == 0:
                 raise HTTPException(
                     status_code=400, detail="PDF has no pages.")
-            bitmap = pdf_doc[0].render(scale=160 / 72, rotation=0)
+            first_page = pdf_doc[0]
+            w, h = first_page.get_size()
+
+            # Fast text extraction: crop to bottom cut-out wallet card area (standard portrait e-Aadhaar A4)
+            # In PDF coordinates, (0,0) is bottom-left, so bottom card is [0, 0, w, h * 0.35]
+            try:
+                textpage = first_page.get_textpage()
+                if h > w:
+                    extracted_text = textpage.get_text_bounded(left=0, bottom=0, right=w, top=h * 0.35)
+                else:
+                    extracted_text = textpage.get_text_range()
+                if not extracted_text.strip():
+                    extracted_text = textpage.get_text_range()
+            except Exception:
+                extracted_text = ""
+
+            bitmap = first_page.render(scale=160 / 72, rotation=0)
             # Convert directly to in-memory NumPy uint8 array (zero disk I/O)
             image_np = bitmap.to_numpy()
+
+            # Crop image to lower cut-out card portion (standard portrait e-Aadhaar) for QR scan
+            img_h, img_w = image_np.shape[:2]
+            target_image = image_np[int(img_h * 0.65):, :] if img_h > img_w else image_np
         finally:
             pdf_doc.close()
 
-        # Step 3: QR scan + OCR pipeline
+        # Step 3: QR scan + text pipeline on cropped card
         result = run_pipeline(
-            image=image_np,
+            image=target_image,
             expected_name=expected_name.strip() or None,
             expected_dob=expected_dob.strip() or None,
+            pdf_text=extracted_text,
         )
     except HTTPException:
         raise

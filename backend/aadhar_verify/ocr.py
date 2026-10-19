@@ -6,22 +6,24 @@ and provides fuzzy cross-matching against registration data.
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-import cv2
 import numpy as np
-import pytesseract
-
-# Configure Tesseract path on Windows
-TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-if os.path.exists(TESSERACT_EXE):
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
 
 DOB_RE_f1 = re.compile(r"\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b")
-DOB_RE_f2 = re.compile(r"\b((?:19|20)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")
+DOB_RE_f2 = re.compile(r"\b((?:19|20-)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")
 YOB_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+
+# DOB-specific prefixes (DOB, D.O.B, Date of Birth, जन्म, जम)
+DOB_PREFIX_RE = re.compile(
+    r"(?:DOB|D\.O\.B|Birth|\u091c\u0928\u094d\u092e|\u091c\u092e)[\s\S]{0,25}?(\d{2}[/\-.]\d{2}[/\-.]\d{4})",
+    re.IGNORECASE
+)
+DOB_PREFIX_RE_Y = re.compile(
+    r"(?:DOB|D\.O\.B|Birth|\u091c\u0928\u094d\u092e|\u091c\u092e)[\s\S]{0,25}?((?:19|20)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))",
+    re.IGNORECASE
+)
 
 
 def normalize_dob_to_ddmmyyyy(raw_dob: str | None) -> str | None:
@@ -71,40 +73,34 @@ class OcrResult:
         }
 
 
-def extract_ocr(image: str | np.ndarray) -> OcrResult:
-    """Run OCR on the rendered page and extract text and DOB. Accepts file path or in-memory NumPy array."""
-    if isinstance(image, np.ndarray):
-        raw = image
-    else:
-        raw = cv2.imread(image)
-    if raw is None:
-        return OcrResult("", None)
+def extract_ocr(pdf_text: str | None = None, image: str | np.ndarray | None = None) -> OcrResult:
+    """Extract demographic details from PDF-extracted text, ignoring metadata dates like Issue/Download."""
+    raw_text = pdf_text or ""
 
-    # Crop to the lower card portion on portrait pages (standard e-Aadhaar A4) to optimize speed
-    h, w = raw.shape[:2]
-    ocr_target = raw[int(h * 0.45):, :] if h > w else raw
+    # Filter out lines that explicitly denote metadata dates (Issue Date, Download Date)
+    clean_lines = [
+        line for line in raw_text.splitlines()
+        if not re.search(r"(?:issue|download)\s*date", line, re.IGNORECASE)
+    ]
+    filtered_text = "\n".join(clean_lines)
 
-    # Perform English OCR pass on the targeted card area
-    try:
-        combined_text = pytesseract.image_to_string(ocr_target, lang="eng")
-    except Exception:
-        try:
-            combined_text = pytesseract.image_to_string(ocr_target)
-        except Exception:
-            combined_text = ""
-
-    # Extract DOB
+    # 1. Look for labeled DOB first (highest confidence)
     detected_dob = None
-    dob_match = DOB_RE_f1.search(combined_text) or DOB_RE_f2.search(combined_text)
-    if dob_match:
-        detected_dob = normalize_dob_to_ddmmyyyy(dob_match.group(1))
+    pref_match = DOB_PREFIX_RE.search(raw_text) or DOB_PREFIX_RE_Y.search(raw_text)
+    if pref_match:
+        detected_dob = normalize_dob_to_ddmmyyyy(pref_match.group(1))
     else:
-        yob_match = YOB_RE.search(combined_text)
-        if yob_match:
-            detected_dob = yob_match.group(1)
+        # 2. Search filtered text (where Issue Date and Download Date have been stripped)
+        dob_match = DOB_RE_f1.search(filtered_text) or DOB_RE_f2.search(filtered_text)
+        if dob_match:
+            detected_dob = normalize_dob_to_ddmmyyyy(dob_match.group(1))
+        else:
+            yob_match = YOB_RE.search(filtered_text)
+            if yob_match:
+                detected_dob = yob_match.group(1)
 
     return OcrResult(
-        text=combined_text,
+        text=raw_text,
         detected_dob=detected_dob,
     )
 
@@ -142,12 +138,19 @@ def fuzzy_match_name(expected_name: str | None, ocr_text: str) -> bool:
 
 
 def match_dob(expected_dob: str | None, ocr_text: str) -> bool:
-    """Check if expected DOB matches text found in OCR."""
+    """Check if expected DOB matches text found in OCR, ignoring Issue/Download dates."""
     if not expected_dob or not ocr_text:
         return False
 
     clean_dob = expected_dob.strip()
     norm_ddmmyyyy = normalize_dob_to_ddmmyyyy(clean_dob)
+
+    # Filter out Issue Date and Download Date lines
+    clean_lines = [
+        line for line in ocr_text.splitlines()
+        if not re.search(r"(?:issue|download)\s*date", line, re.IGNORECASE)
+    ]
+    target_text = "\n".join(clean_lines).lower()
 
     variants = {
         clean_dob.lower(),
@@ -166,5 +169,4 @@ def match_dob(expected_dob: str | None, ocr_text: str) -> bool:
             variants.add(f"{y}/{m}/{d}")
             variants.add(f"{y}.{m}.{d}")
 
-    text_lower = ocr_text.lower()
-    return any(v in text_lower for v in variants)
+    return any(v in target_text for v in variants)

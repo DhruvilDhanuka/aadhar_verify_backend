@@ -18,8 +18,9 @@ def run_pipeline(
     expected_name: str | None = None,
     expected_dob: str | None = None,
     image_path: str | None = None,
+    pdf_text: str | None = None,
 ) -> dict:
-    """Run the complete Aadhaar PDF verification pipeline with QR primary and OCR fallback. Accepts image array or path."""
+    """Run the complete Aadhaar PDF verification pipeline with QR primary and text fallback. Accepts image array or path and extracted pdf_text."""
     target_image = image if image is not None else image_path
     if target_image is None:
         raise ValueError("Either 'image' (np.ndarray) or 'image_path' (str) must be provided.")
@@ -60,10 +61,10 @@ def run_pipeline(
         raw_dob = qr_fields.get("dob") or qr_fields.get("yob")
         qr_dob = raw_dob.strip() if raw_dob and raw_dob.strip() else None
 
-    # Run OCR ONLY if QR was unreadable OR if either name or DOB is missing (None) from QR
+    # Run text fallback ONLY if QR was unreadable OR if either name or DOB is missing (None) from QR
     needs_ocr = (not qr_result.decoded) or (qr_name is None) or (qr_dob is None)
     if needs_ocr:
-        ocr_result = extract_ocr(target_image)
+        ocr_result = extract_ocr(pdf_text=pdf_text, image=target_image)
 
     # ?? PATH A: Primary Verification via QR Demographics ??????????????????
     if qr_result.decoded:
@@ -165,7 +166,7 @@ def run_pipeline(
                 reg_ocr_match=reg_ocr_match,
             )
 
-    # ?? PATH B: Fallback Verification via Printed Card OCR ??????????????????
+    #  PATH B: Fallback Verification via Printed Card OCR 
     # (Triggered when QR is missing or unreadable in an authentic signed PDF)
     ocr_name_match = (
         fuzzy_match_name(exp_name, ocr_result.text)
