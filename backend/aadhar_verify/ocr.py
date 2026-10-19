@@ -134,7 +134,7 @@ def fuzzy_match_name(expected_name: str | None, ocr_text: str) -> bool:
         if ratio > best_ratio:
             best_ratio = ratio
 
-    return best_ratio >= 0.75
+    return best_ratio >= 0.88
 
 
 def match_dob(expected_dob: str | None, ocr_text: str) -> bool:
