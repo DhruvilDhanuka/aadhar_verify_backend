@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from .qr_verify import check_qr
-from .ocr import extract_ocr, match_names, fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy, is_18_or_older
+from .ocr import extract_ocr, names_match,fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy, is_18_or_older
 
 
 def run_pipeline(
@@ -71,7 +71,7 @@ def run_pipeline(
         # 1. Name Match
         name_matched_via_ocr = False
         if qr_name is not None:
-            name_match = match_names(exp_name, qr_name)
+            name_match = names_match(exp_name, qr_name)
         else:
             name_matched_via_ocr = bool(
                 ocr_result and ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text)
@@ -125,7 +125,6 @@ def run_pipeline(
                     verdict="FAIL",
                     verdict_reason=(
                         f"Age verification failed: Attendee is {age_str}. "
-                        "Mood Indigo registration requires attendees to be at least 18 years of age."
                     ),
                     reupload_required=False,
                     reupload_message="Attendees under 18 years of age are not eligible to attend.",
@@ -186,80 +185,23 @@ def run_pipeline(
                 reg_ocr_match=reg_ocr_match,
             )
 
-    #  PATH B: Fallback Verification via Printed Card OCR 
-    # (Triggered when QR is missing or unreadable in an authentic signed PDF)
-    ocr_name_match = (
-        fuzzy_match_name(exp_name, ocr_result.text)
-        if (ocr_result and ocr_result.text)
-        else False
-    )
-    ocr_dob_match = bool(
-        ocr_result and (
-            (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
-            or match_dob(exp_dob, ocr_result.text)
-        )
-    )
 
-    if ocr_name_match and ocr_dob_match:
-        # 18+ Verification check
-        verified_dob = (ocr_result.detected_dob if ocr_result and ocr_result.detected_dob else None) or exp_dob
-        is_adult, age = is_18_or_older(verified_dob)
-        if not is_adult:
-            age_str = f"{age} years old" if age is not None else "under 18"
-            return _build_response(
+    else:
+        return _build_response(
                 verdict="FAIL",
                 verdict_reason=(
-                    f"Age verification failed: Attendee is {age_str}. "
-                    "Mood Indigo registration requires attendees to be at least 18 years of age."
+                    f"Not able to read the QR code. It seems like the QR code has been tampered with or it is not an Aadhaar card"
                 ),
-                reupload_required=False,
-                reupload_message="Attendees under 18 years of age are not eligible to attend.",
+                reupload_required=True,
+                reupload_message="Please upload your own Aadhaar card that matches your registration details.",
                 exp_name=exp_name,
                 exp_dob=exp_dob,
                 qr_result=qr_result,
                 ocr_result=ocr_result,
                 reg_qr_match=False,
-                qr_ocr_match=None,
-                reg_ocr_match=True,
-                age=age,
-            )
-
-        return _build_response(
-            verdict="PASS",
-            verdict_reason="Verification successful: Identity verified via printed document text (QR unreadable).",
-            reupload_required=False,
-            reupload_message=None,
-            exp_name=exp_name,
-            exp_dob=exp_dob,
-            qr_result=qr_result,
-            ocr_result=ocr_result,
-            reg_qr_match=False,
-            qr_ocr_match=None,
-            reg_ocr_match=True,
-            age=age,
-        )
-    else:
-        mismatches = []
-        if not ocr_name_match:
-            mismatches.append("Name")
-        if not ocr_dob_match:
-            mismatches.append("Date of Birth")
-        return _build_response(
-            verdict="FAIL",
-            verdict_reason=(
-                f"Identity mismatch on: {', '.join(mismatches)}. "
-                f"The registration details do not match the printed text in this document."
-            ),
-            reupload_required=True,
-            reupload_message="Please upload your own Aadhaar card that matches your registration details.",
-            exp_name=exp_name,
-            exp_dob=exp_dob,
-            qr_result=qr_result,
-            ocr_result=ocr_result,
-            reg_qr_match=False,
-            qr_ocr_match=None,
-            reg_ocr_match=False,
-        )
+                qr_ocr_match=False,
+                reg_ocr_match=False,
+                )
 
 
 def _build_response(

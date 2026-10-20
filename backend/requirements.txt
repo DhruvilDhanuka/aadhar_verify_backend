@@ -10,3 +10,4 @@ python-multipart
 pypdfium2
 defusedxml
 pyhanko
+rapidfuzz>=3.9,<4

@@ -11,6 +11,8 @@ from datetime import date
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import numpy as np
+from rapidfuzz import fuzz
+
 
 DOB_RE_f1 = re.compile(r"\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b")
 DOB_RE_f2 = re.compile(r"\b((?:19|20-)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")
@@ -145,93 +147,25 @@ def extract_ocr(pdf_text: str | None = None, image: str | np.ndarray | None = No
     )
 
 
-COMMON_NAME_ABBREVIATIONS = {
-    "md": "mohammed",
-    "mohd": "mohammed",
-    "mohammad": "mohammed",
-    "muhammad": "mohammed",
-    "ku": "kumari",
-    "km": "kumari",
+
+NAME_ABBREVIATIONS = {
+    "md": "mohammed", "mohd": "mohammed", "mohammad": "mohammed",
+    "muhammad": "mohammed", "ku": "kumari", "km": "kumari",
 }
 
+def normalize_name(name: str) -> str:
+    """Lowercase, strip titles, keep only letters, expand abbreviations."""
+    name = re.sub(r"\b(mr|ms|mrs|shri|smt|dr)\b\.?", "", name.lower())
+    words = [NAME_ABBREVIATIONS.get(w, w) for w in re.findall(r"[a-z]+", name) if len(w) >= 2]
+    return " ".join(words)
 
-def _clean_name_tokens(name: str) -> list[str]:
-    """Clean and tokenize name into individual alphabetic words."""
-    cleaned = re.sub(r"\b(mr|ms|mrs|shri|smt|dr)\b\.?", "", name.lower())
-    tokens = []
-    for w in re.findall(r"[a-z]+", cleaned):
-        if len(w) >= 2:
-            tokens.append(COMMON_NAME_ABBREVIATIONS.get(w, w))
-    return tokens
-
-
-def _words_similar(w1: str, w2: str, threshold: float = 0.82) -> bool:
-    """Check if two individual name tokens are identical or minor typos."""
-    if w1 == w2:
-        return True
-    return SequenceMatcher(None, w1, w2).ratio() >= threshold
-
-
-def match_names(expected_name: str | None, actual_name: str | None) -> bool:
-    """
-    Robust name matcher for Aadhaar verification (Expected Name vs QR Name).
-    Prevents substring exploits (e.g. 'Raj' vs 'Rajesh', 'Singh' vs 'Vikramaditya Singh'),
-    while allowing flipped order ('Dhruvil Dhanuka' == 'Dhanuka Dhruvil'), missing middle
-    names ('Rahul Sharma' matches 'Rahul Kumar Sharma'), and minor typos / abbreviations.
-    """
-    if not expected_name or not actual_name:
+def names_match(expected: str | None, actual: str | None, threshold: int = 88) -> bool:
+    if not expected or not actual:
         return False
-
-    exp_clean = expected_name.strip()
-    act_clean = actual_name.strip()
-    if len(exp_clean) < 3 or len(act_clean) < 3:
+    a, b = normalize_name(expected), normalize_name(actual)
+    if not a or not b:
         return False
-
-    exp_tokens = _clean_name_tokens(exp_clean)
-    act_tokens = _clean_name_tokens(act_clean)
-
-    if not exp_tokens or not act_tokens:
-        return False
-
-    # 1. Exact match (normalized)
-    if " ".join(exp_tokens) == " ".join(act_tokens):
-        return True
-
-    # 2. Order-independent exact match ("Dhruvil Dhanuka" == "Dhanuka Dhruvil")
-    if sorted(exp_tokens) == sorted(act_tokens):
-        return True
-
-    # 3. Single-token registrant (e.g. "Aman")
-    # Must only match if the Aadhaar name is also a single token
-    if len(exp_tokens) == 1:
-        if len(act_tokens) == 1:
-            return _words_similar(exp_tokens[0], act_tokens[0], threshold=0.82)
-        return False
-
-    if len(act_tokens) == 1:
-        return False
-
-    # 4. Multi-token match (First name + Last name validation)
-    first_exp, last_exp = exp_tokens[0], exp_tokens[-1]
-    first_matched = any(_words_similar(first_exp, q) for q in act_tokens)
-    last_matched = any(_words_similar(last_exp, q) for q in act_tokens)
-
-    if not (first_matched and last_matched):
-        return False
-
-    # 5. Token overlap ratio check
-    matched_count = 0
-    used_act = set()
-    for e in exp_tokens:
-        for idx, q in enumerate(act_tokens):
-            if idx not in used_act and _words_similar(e, q, threshold=0.82):
-                matched_count += 1
-                used_act.add(idx)
-                break
-
-    ratio = matched_count / max(len(exp_tokens), len(act_tokens))
-    return ratio >= 0.60
-
+    return fuzz.token_sort_ratio(a, b) >= threshold
 
 def fuzzy_match_name(expected_name: str | None, ocr_text: str) -> bool:
     """Check if expected name matches text found in OCR using word boundaries and sliding window fuzzy ratio."""
