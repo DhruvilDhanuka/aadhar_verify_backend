@@ -5,8 +5,13 @@ Zero-retention: uploaded PDFs are written to a temp file, the first page
 is rendered to an in-memory PNG, processed, and all temp files are
 immediately deleted. No PII is logged or persisted.
 """
+
+
+
 from __future__ import annotations
 import shutil
+from db import add,exists,col,norm
+from pydantic import BaseModel, EmailStr
 
 
 import tempfile
@@ -120,6 +125,15 @@ def open_pdf_document(pdf_input: str | bytes, passwords: list[str]) -> pdfium.Pd
 
     raise HTTPException(
         status_code=400, detail="Unable to open or decrypt the PDF document.")
+
+
+class EmailIn(BaseModel):
+    email: EmailStr
+
+@app.post("/emails/check")
+def check_email(body: EmailIn):
+    found = exists(body.email)
+    return {"exists": found}
 
 
 @app.post("/api/verify")
