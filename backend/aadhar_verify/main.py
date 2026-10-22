@@ -115,10 +115,11 @@ def run_pipeline(
         else:
             reg_qr_match = False
 
+        # Always calculate 18+ age status from verified or extracted DOB
+        verified_dob = (qr_dob if qr_dob and len(qr_dob.split("-")) == 3 else None) or exp_dob or qr_dob
+        is_adult, age = is_18_or_older(verified_dob) if verified_dob else (False, None)
+
         if name_match and dob_match:
-            # 18+ Verification check
-            verified_dob = (qr_dob if qr_dob and len(qr_dob.split("-")) == 3 else None) or exp_dob or qr_dob
-            is_adult, age = is_18_or_older(verified_dob)
             if not is_adult:
                 age_str = f"{age} years old" if age is not None else "under 18"
                 return _build_response(
@@ -136,6 +137,7 @@ def run_pipeline(
                     qr_ocr_match=qr_ocr_match,
                     reg_ocr_match=reg_ocr_match,
                     age=age,
+                    is_adult=is_adult,
                 )
 
             if dob_matched_via_ocr and name_matched_via_ocr:
@@ -160,6 +162,7 @@ def run_pipeline(
                 qr_ocr_match=qr_ocr_match,
                 reg_ocr_match=reg_ocr_match,
                 age=age,
+                is_adult=is_adult,
             )
         else:
             mismatches = []
@@ -183,10 +186,13 @@ def run_pipeline(
                 reg_qr_match=reg_qr_match,
                 qr_ocr_match=qr_ocr_match,
                 reg_ocr_match=reg_ocr_match,
+                age=age,
+                is_adult=is_adult,
             )
 
 
     else:
+        fallback_is_adult, fallback_age = is_18_or_older(exp_dob) if exp_dob else (False, None)
         return _build_response(
                 verdict="FAIL",
                 verdict_reason=(
@@ -201,6 +207,8 @@ def run_pipeline(
                 reg_qr_match=False,
                 qr_ocr_match=False,
                 reg_ocr_match=False,
+                age=fallback_age,
+                is_adult=fallback_is_adult,
                 )
 
 
@@ -217,6 +225,7 @@ def _build_response(
     qr_ocr_match: bool | None,
     reg_ocr_match: bool | None,
     age: int | None = None,
+    is_adult: bool | None = None,
 ) -> dict:
     """Build a unified JSON response structured specifically for the frontend."""
     return {
@@ -225,10 +234,13 @@ def _build_response(
         "reupload_required": reupload_required,
         "reupload_message": reupload_message,
         "file_type": "pdf",
+        "is_adult": is_adult,
+        "age": age,
         "registration_data": {
             "name": exp_name,
             "dob": exp_dob,
             "age": age,
+            "is_adult": is_adult,
         },
         "qr_data": {
             "decoded": qr_result.decoded if qr_result else False,
