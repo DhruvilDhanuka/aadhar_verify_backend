@@ -10,4 +10,6 @@ python-multipart
 pypdfium2
 defusedxml
 pyhanko
+pymongo
+python-dotenv
 rapidfuzz>=3.9,<4
