@@ -12,4 +12,5 @@ defusedxml
 pyhanko
 pymongo
 python-dotenv
+pydantic[email]
 rapidfuzz>=3.9,<4
