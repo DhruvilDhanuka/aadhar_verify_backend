@@ -2,16 +2,14 @@
 OCR text extraction and pattern matching for Aadhaar card PDF pages.
 
 Extracts printed text, card numbers, dates of birth, and names from Aadhaar cards,
-and provides fuzzy cross-matching against registration data.
+and provides strict verification against registration data.
 """
 from __future__ import annotations
 
 import re
 from datetime import date
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import numpy as np
-from rapidfuzz import fuzz
 
 
 DOB_RE_f1 = re.compile(r"\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b")
@@ -147,65 +145,79 @@ def extract_ocr(pdf_text: str | None = None, image: str | np.ndarray | None = No
     )
 
 
-
-NAME_ABBREVIATIONS = {
-    "md": "mohammed", "mohd": "mohammed", "mohammad": "mohammed",
-    "muhammad": "mohammed", "ku": "kumari", "km": "kumari",
-}
-
 def normalize_name(name: str) -> str:
-    """Lowercase, strip titles, keep only letters, expand abbreviations."""
+    """Lowercase, strip honorific titles (Mr/Ms/etc.), and keep alphabetic words (no abbreviation expansion)."""
+    if not name:
+        return ""
     name = re.sub(r"\b(mr|ms|mrs|shri|smt|dr)\b\.?", "", name.lower())
-    words = [NAME_ABBREVIATIONS.get(w, w) for w in re.findall(r"[a-z]+", name) if len(w) >= 2]
+    words = re.findall(r"[a-z]+", name)
     return " ".join(words)
 
-def names_match(expected: str | None, actual: str | None, threshold: int = 88) -> bool:
+
+def names_match(expected: str | None, actual: str | None) -> bool:
+    """Strict name match: all words in the full name must match (allows first/last order differences)."""
     if not expected or not actual:
         return False
-    a, b = normalize_name(expected), normalize_name(actual)
-    if not a or not b:
+    exp_words = normalize_name(expected).split()
+    act_words = normalize_name(actual).split()
+    if not exp_words or not act_words:
         return False
-    return fuzz.token_sort_ratio(a, b) >= threshold
+    return exp_words == act_words or sorted(exp_words) == sorted(act_words)
 
-def fuzzy_match_name(expected_name: str | None, ocr_text: str) -> bool:
-    """Check if expected name matches text found in OCR using word boundaries and sliding window fuzzy ratio."""
+
+def extract_name_from_ocr(ocr_text: str) -> str | None:
+    """Extract candidate English name located immediately above the DOB line in Aadhaar text, including multi-line names."""
+    lines = [line.strip() for line in (ocr_text or "").splitlines() if line.strip()]
+    dob_idx = -1
+    for i, line in enumerate(lines):
+        if re.search(r"(?:DOB|Date of Birth|Birth|\u091c\u0928\u094d\u092e|\u092e\s*\u0924\u0925)", line, re.IGNORECASE):
+            dob_idx = i
+            break
+
+    if dob_idx > 0:
+        name_lines = []
+        # Walk backwards from line above DOB, collecting consecutive lines with English letters
+        for j in range(dob_idx - 1, -1, -1):
+            line = lines[j]
+            # Stop if reaching metadata lines (Issue Date, Download Date, VID, etc.)
+            if re.search(r"(?:issue|download|date|vid|uid|details|aadhaar)", line, re.IGNORECASE):
+                break
+            # Collect English lines; stop once reaching a line without English (e.g. Hindi name)
+            if re.search(r"[a-zA-Z]", line):
+                name_lines.insert(0, line)
+            else:
+                break
+
+        if name_lines:
+            return " ".join(name_lines)
+    return None
+
+
+def match_name_in_ocr(expected_name: str | None, ocr_text: str) -> bool:
+    """Strict name match against OCR text (checks full name above DOB first)."""
     if not expected_name or not ocr_text:
         return False
 
-    expected_clean = expected_name.strip().lower()
-    text_clean = ocr_text.lower()
-
-    if len(expected_clean) < 3:
+    exp_words = normalize_name(expected_name).split()
+    if not exp_words:
         return False
 
-    # Exact token / whole-word check
-    if re.search(r"\b" + re.escape(expected_clean) + r"\b", text_clean):
-        return True
+    # 1. Primary Aadhaar layout: English name line(s) directly above the DOB line
+    card_name = extract_name_from_ocr(ocr_text)
+    if card_name:
+        return names_match(expected_name, card_name)
 
-    # Token match (e.g. "Rahul", "Kumar") with word boundaries
-    tokens = [t for t in expected_clean.split() if len(t) > 2]
-    if tokens and all(re.search(r"\b" + re.escape(t) + r"\b", text_clean) for t in tokens):
-        return True
+    # 2. Fallback only if DOB line was not found: check if any line has all expected words
+    for line in ocr_text.splitlines():
+        line_words = normalize_name(line).split()
+        if len(line_words) == len(exp_words) and sorted(line_words) == sorted(exp_words):
+            return True
 
-    # Sliding-window SequenceMatcher (handles minor character discrepancies)
-    window = len(expected_clean)
-    if len(text_clean) < window:
-        return False
+    return False
 
-    best_ratio = 0.0
-    for i in range(len(text_clean) - window + 1):
-        # Must be bounded by non-alphabetic characters (word boundaries)
-        if i > 0 and text_clean[i - 1].isalpha():
-            continue
-        if (i + window) < len(text_clean) and text_clean[i + window].isalpha():
-            continue
 
-        chunk = text_clean[i : i + window]
-        ratio = SequenceMatcher(None, expected_clean, chunk).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-
-    return best_ratio >= 0.88
+# Alias for backwards compatibility with main.py
+fuzzy_match_name = match_name_in_ocr
 
 
 def match_dob(expected_dob: str | None, ocr_text: str) -> bool:

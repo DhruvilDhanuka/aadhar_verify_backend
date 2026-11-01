@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 from pyzbar.pyzbar import decode as zbar_decode
 import defusedxml.ElementTree as ET
-
+import cv2
+import os
 
 # ── Field order for each known Secure QR version ────────────────────────
 _VERSIONED_FIELDS = [
@@ -165,14 +166,25 @@ def _decode_secure_qr(numeric_payload: str) -> dict:
 def check_qr(image: str | np.ndarray) -> QrResult:
     """Detect and decode UIDAI QR demographics from a rendered document page or in-memory NumPy array."""
     qr_payload = _locate_qr_payload(image)
+    os.makedirs("output", exist_ok=True)
+    ok = cv2.imwrite("output/qr_page.png", image)
+    print(ok)  # False means it didn't save
+
+    
     if not qr_payload:
+        print("=============NOT FOUND QR==============")
         return QrResult(decoded=False, fields={})
 
     fmt = _qr_format(qr_payload)
 
+
+    print("===========FORMAT============:",fmt)
+
     if fmt == "old_xml":
         try:
             xml_fields = _parse_old_xml_qr(qr_payload)
+            print("==============FIELDS DETECTE IN OLD QR============")
+            print(xml_fields)
             return QrResult(decoded=True, fields=xml_fields)
         except ValueError:
             return QrResult(decoded=False, fields={})
@@ -183,6 +195,11 @@ def check_qr(image: str | np.ndarray) -> QrResult:
     try:
         fields = _decode_secure_qr(qr_payload)
         safe_fields = {k: v for k, v in fields.items() if k != "referenceid"}
+
+        print("==============FIELDS DETECTE IN NEW QR============")
+        print(safe_fields)
+
+
         return QrResult(decoded=True, fields=safe_fields)
     except Exception:
         return QrResult(decoded=False, fields={})

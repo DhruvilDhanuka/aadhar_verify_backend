@@ -10,7 +10,15 @@ from __future__ import annotations
 import numpy as np
 
 from .qr_verify import check_qr
-from .ocr import extract_ocr, names_match,fuzzy_match_name, match_dob, dobs_match, normalize_dob_to_ddmmyyyy, is_18_or_older
+from .ocr import (
+    extract_ocr,
+    names_match,
+    fuzzy_match_name,
+    match_dob,
+    dobs_match,
+    normalize_dob_to_ddmmyyyy,
+    is_18_or_older,
+)
 
 
 def run_pipeline(
@@ -35,15 +43,9 @@ def run_pipeline(
                 "Both Registration Name and Date of Birth are strictly required "
                 "to verify your identity against the official Aadhaar document."
             ),
-            reupload_required=True,
             reupload_message="Please enter both your full Name and Date of Birth as registered, and submit again.",
-            exp_name=exp_name,
-            exp_dob=exp_dob,
-            qr_result=None,
-            ocr_result=None,
-            reg_qr_match=False,
-            qr_ocr_match=None,
-            reg_ocr_match=False,
+            name=exp_name,
+            dob=exp_dob,
         )
 
     # Step 2: Attempt to decode QR first
@@ -61,206 +63,186 @@ def run_pipeline(
         raw_dob = qr_fields.get("dob") or qr_fields.get("yob")
         qr_dob = raw_dob.strip() if raw_dob and raw_dob.strip() else None
 
-    # Run text fallback ONLY if QR was unreadable OR if either name or DOB is missing (None) from QR
-    needs_ocr = (not qr_result.decoded) or (qr_name is None) or (qr_dob is None)
+    # Run OCR if QR is unreadable, if name or DOB is missing, or if QR DOB only has 4-digit Year
+    needs_ocr = (not qr_result.decoded) or (qr_name is None) or (qr_dob is None) or (qr_dob and len(qr_dob) == 4)
     if needs_ocr:
         ocr_result = extract_ocr(pdf_text=pdf_text, image=target_image)
 
-    # ?? PATH A: Primary Verification via QR Demographics ??????????????????
-    if qr_result.decoded:
-        # 1. Name Match
-        name_matched_via_ocr = False
-        if qr_name is not None:
-            name_match = names_match(exp_name, qr_name)
-        else:
-            name_matched_via_ocr = bool(
-                ocr_result and ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text)
-            )
-            name_match = name_matched_via_ocr
+    # If QR only had 4-digit Year of Birth (e.g. '2006'), find exact full date (DD-MM-YYYY) through OCR
+    if qr_dob and len(qr_dob) == 4:
+        full_ocr_dob = None
+        if ocr_result and ocr_result.detected_dob and len(ocr_result.detected_dob.split("-")) == 3:
+            if ocr_result.detected_dob.endswith(f"-{qr_dob}"):
+                full_ocr_dob = ocr_result.detected_dob
+        elif ocr_result and ocr_result.text and match_dob(exp_dob, ocr_result.text):
+            if exp_dob.endswith(f"-{qr_dob}"):
+                full_ocr_dob = exp_dob
 
-        # 2. DOB Match
-        # If QR date of birth is found: check match directly; if not matching, dobs_match is False!
-        # Do OCR fallback for DOB ONLY if QR DOB was not found (None).
-        dob_matched_via_ocr = False
-        if qr_dob is not None:
-            dob_match = dobs_match(exp_dob, qr_dob)
-        else:
-            ocr_dob_matches = bool(
-                ocr_result and (
-                    (ocr_result.detected_dob and dobs_match(exp_dob, ocr_result.detected_dob))
-                    or match_dob(exp_dob, ocr_result.text)
-                )
-            )
-            if ocr_dob_matches:
-                dob_match = True
-                dob_matched_via_ocr = True
-            else:
-                dob_match = False
+        if full_ocr_dob:
+            qr_dob = full_ocr_dob
 
-        # Visual OCR cross-checks (only if OCR was performed)
-        qr_ocr_match = None
-        reg_ocr_match = None
-        if ocr_result and ocr_result.text:
-            if qr_name:
-                qr_ocr_match = fuzzy_match_name(qr_name, ocr_result.text)
-            reg_ocr_match = fuzzy_match_name(exp_name, ocr_result.text)
+    # Verification structure based on detected demographics
+    if qr_name and qr_dob:
+        return _evaluate_match_and_build_response(
+            name_match=names_match(exp_name, qr_name),
+            dob_match=dobs_match(exp_dob, qr_dob),
+            name=qr_name,
+            dob=qr_dob,
+            exp_name=exp_name,
+            exp_dob=exp_dob,
+            success_reason="Verification successful: Identity and Age verified against official UIDAI QR code in signed document.",
+        )
 
-        # Registration vs QR match flag
-        if qr_name is not None and qr_dob is not None:
-            reg_qr_match = name_match and dob_match
-        elif qr_name is not None:
-            reg_qr_match = name_match
-        elif qr_dob is not None:
-            reg_qr_match = dob_match
-        else:
-            reg_qr_match = False
+    elif qr_name:
+        if not ocr_result:
+            ocr_result = extract_ocr(pdf_text=pdf_text, image=target_image)
 
-        # Always calculate 18+ age status from verified or extracted DOB
-        verified_dob = (qr_dob if qr_dob and len(qr_dob.split("-")) == 3 else None) or exp_dob or qr_dob
-        is_adult, age = is_18_or_older(verified_dob) if verified_dob else (False, None)
+        detected_dob = None
+        dob_match = False
+        if ocr_result and ocr_result.detected_dob:
+            detected_dob = ocr_result.detected_dob
+            dob_match = dobs_match(exp_dob, detected_dob)
 
-        if name_match and dob_match:
-            if not is_adult:
-                age_str = f"{age} years old" if age is not None else "under 18"
-                return _build_response(
-                    verdict="FAIL",
-                    verdict_reason=(
-                        f"Age verification failed: Attendee is {age_str}. "
-                    ),
-                    reupload_required=False,
-                    reupload_message="Attendees under 18 years of age are not eligible to attend.",
-                    exp_name=exp_name,
-                    exp_dob=exp_dob,
-                    qr_result=qr_result,
-                    ocr_result=ocr_result,
-                    reg_qr_match=reg_qr_match,
-                    qr_ocr_match=qr_ocr_match,
-                    reg_ocr_match=reg_ocr_match,
-                    age=age,
-                    is_adult=is_adult,
-                )
+        # If detected_dob from OCR didn't match, check if expected DOB matches text in OCR
+        if not dob_match and ocr_result and ocr_result.text and match_dob(exp_dob, ocr_result.text):
+            detected_dob = exp_dob
+            dob_match = True
 
-            if dob_matched_via_ocr and name_matched_via_ocr:
-                reason = "Verification successful: QR code verified (Name and Date of Birth verified via printed card text)."
-            elif dob_matched_via_ocr:
-                reason = "Verification successful: QR code verified (Date of Birth verified via printed card text)."
-            elif name_matched_via_ocr:
-                reason = "Verification successful: QR code verified (Name verified via printed card text)."
-            else:
-                reason = "Verification successful: Identity verified against official UIDAI QR code in signed document."
+        return _evaluate_match_and_build_response(
+            name_match=names_match(exp_name, qr_name),
+            dob_match=dob_match,
+            name=qr_name,
+            dob=detected_dob or exp_dob,
+            exp_name=exp_name,
+            exp_dob=exp_dob,
+            success_reason="Verification successful: Name verified via QR code and Date of Birth verified via printed card text.",
+        )
 
-            return _build_response(
-                verdict="PASS",
-                verdict_reason=reason,
-                reupload_required=False,
-                reupload_message=None,
-                exp_name=exp_name,
-                exp_dob=exp_dob,
-                qr_result=qr_result,
-                ocr_result=ocr_result,
-                reg_qr_match=reg_qr_match,
-                qr_ocr_match=qr_ocr_match,
-                reg_ocr_match=reg_ocr_match,
-                age=age,
-                is_adult=is_adult,
-            )
-        else:
-            mismatches = []
-            if not name_match:
-                mismatches.append("Name")
-            if not dob_match:
-                mismatches.append("Date of Birth")
-            return _build_response(
-                verdict="FAIL",
-                verdict_reason=(
-                    f"Identity mismatch on: {', '.join(mismatches)}. "
-                    f"The registration details do not match the person inside the document QR "
-                    f"(Registered: {exp_name}, QR: {qr_name or 'N/A'})."
-                ),
-                reupload_required=True,
-                reupload_message="Please upload your own Aadhaar card that matches your registration details.",
-                exp_name=exp_name,
-                exp_dob=exp_dob,
-                qr_result=qr_result,
-                ocr_result=ocr_result,
-                reg_qr_match=reg_qr_match,
-                qr_ocr_match=qr_ocr_match,
-                reg_ocr_match=reg_ocr_match,
-                age=age,
-                is_adult=is_adult,
-            )
+    elif qr_dob:
+        if not ocr_result:
+            ocr_result = extract_ocr(pdf_text=pdf_text, image=target_image)
 
+        name_match = bool(ocr_result and ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text))
+        return _evaluate_match_and_build_response(
+            name_match=name_match,
+            dob_match=dobs_match(exp_dob, qr_dob),
+            name=exp_name if name_match else None,
+            dob=qr_dob,
+            exp_name=exp_name,
+            exp_dob=exp_dob,
+            success_reason="Verification successful: Date of Birth verified via QR code and Name verified via printed card text.",
+        )
 
     else:
-        fallback_is_adult, fallback_age = is_18_or_older(exp_dob) if exp_dob else (False, None)
-        return _build_response(
+        # Fallback: QR code could not be read; verify both Name and Date of Birth from card text via OCR
+        if not ocr_result:
+            ocr_result = extract_ocr(pdf_text=pdf_text, image=target_image)
+
+        if not ocr_result or not ocr_result.text:
+            fallback_is_adult, fallback_age = is_18_or_older(exp_dob) if exp_dob else (False, None)
+            return _build_response(
                 verdict="FAIL",
-                verdict_reason=(
-                    f"Not able to read the QR code. It seems like the QR code has been tampered with or it is not an Aadhaar card"
-                ),
-                reupload_required=True,
+                verdict_reason="Unable to read the QR code or printed text from the document. The file may be corrupt or unreadable.",
                 reupload_message="Please upload your own Aadhaar card that matches your registration details.",
-                exp_name=exp_name,
-                exp_dob=exp_dob,
-                qr_result=qr_result,
-                ocr_result=ocr_result,
-                reg_qr_match=False,
-                qr_ocr_match=False,
-                reg_ocr_match=False,
+                name=None,
+                dob=None,
                 age=fallback_age,
                 is_adult=fallback_is_adult,
-                )
+            )
+
+        name_match = bool(ocr_result.text and fuzzy_match_name(exp_name, ocr_result.text))
+
+        detected_dob = None
+        dob_match = False
+        if ocr_result.detected_dob:
+            detected_dob = ocr_result.detected_dob
+            dob_match = dobs_match(exp_dob, detected_dob)
+
+        if not dob_match and match_dob(exp_dob, ocr_result.text):
+            detected_dob = exp_dob
+            dob_match = True
+
+        return _evaluate_match_and_build_response(
+            name_match=name_match,
+            dob_match=dob_match,
+            name=exp_name if name_match else None,
+            dob=detected_dob,
+            exp_name=exp_name,
+            exp_dob=exp_dob,
+            success_reason="Verification successful: Identity and Age verified via printed card text.",
+        )
+
+
+def _evaluate_match_and_build_response(
+    name_match: bool,
+    dob_match: bool,
+    name: str | None,
+    dob: str | None,
+    exp_name: str,
+    exp_dob: str,
+    success_reason: str,
+) -> dict:
+    """Helper function to evaluate identity matching and 18+ age criteria, returning a unified response."""
+    verified_dob = dob if (dob and len(dob.split("-")) == 3) else exp_dob
+    is_adult, age = is_18_or_older(verified_dob)
+
+    if name_match and dob_match:
+        if not is_adult:
+            age_str = f"{age} years old" if age is not None else "under 18"
+            return _build_response(
+                verdict="FAIL",
+                verdict_reason=f"Age verification failed: Attendee is {age_str}.",
+                reupload_message="Attendees under 18 years of age are not eligible to attend.",
+                name=name,
+                dob=dob,
+                age=age,
+                is_adult=is_adult,
+            )
+        return _build_response(
+            verdict="PASS",
+            verdict_reason=success_reason,
+            name=name,
+            dob=dob,
+            age=age,
+            is_adult=is_adult,
+        )
+    else:
+        mismatches = []
+        if not name_match:
+            mismatches.append("Name")
+        if not dob_match:
+            mismatches.append("Date of Birth")
+        return _build_response(
+            verdict="FAIL",
+            verdict_reason=(
+                f"Identity mismatch on: {', '.join(mismatches)}. "
+                f"The registration details do not match the document details "
+                f"(Registered: {exp_name}, {exp_dob} | Document: {name or 'N/A'}, {dob or 'N/A'})."
+            ),
+            reupload_message="Please upload your own Aadhaar card that matches your registration details.",
+            name=name,
+            dob=dob,
+            age=age,
+            is_adult=is_adult,
+        )
 
 
 def _build_response(
     verdict: str,
     verdict_reason: str,
-    reupload_required: bool,
-    reupload_message: str | None,
-    exp_name: str | None,
-    exp_dob: str | None,
-    qr_result,
-    ocr_result,
-    reg_qr_match: bool | None,
-    qr_ocr_match: bool | None,
-    reg_ocr_match: bool | None,
+    name: str | None = None,
+    dob: str | None = None,
     age: int | None = None,
     is_adult: bool | None = None,
+    reupload_message: str | None = None,
 ) -> dict:
-    """Build a unified JSON response structured specifically for the frontend."""
+    """Build a unified, lightweight JSON response for the frontend."""
     return {
         "verdict": verdict,
         "verdict_reason": verdict_reason,
-        "reupload_required": reupload_required,
         "reupload_message": reupload_message,
-        "file_type": "pdf",
-        "is_adult": is_adult,
+        "name": name,
+        "dob": dob,
         "age": age,
-        "registration_data": {
-            "name": exp_name,
-            "dob": exp_dob,
-            "age": age,
-            "is_adult": is_adult,
-        },
-        "qr_data": {
-            "decoded": qr_result.decoded if qr_result else False,
-            "name": qr_result.fields.get("name") if (qr_result and qr_result.decoded) else None,
-            "dob": (qr_result.fields.get("dob") or qr_result.fields.get("yob")) if (qr_result and qr_result.decoded) else None,
-            "gender": qr_result.fields.get("gender") if (qr_result and qr_result.decoded) else None,
-            "reference_id": (
-                qr_result.fields.get("reference_id")
-                or qr_result.fields.get("referenceid_last4")
-                or qr_result.fields.get("aadhaar_last_4_digit")
-            ) if (qr_result and qr_result.decoded) else None,
-        },
-        "ocr_data": ocr_result.to_dict() if ocr_result else None,
-        "cross_checks": {
-            "registration_vs_qr": reg_qr_match,
-            "qr_vs_card_text": qr_ocr_match,
-            "registration_vs_card_text": reg_ocr_match,
-        },
-        # Backwards compatibility fields for frontend
-        "qr_decoded": qr_result.decoded if qr_result else False,
-        "signature_verified": True,  # Document is authenticated via UIDAI PDF signature
-        "qr_fields": qr_result.fields if (qr_result and qr_result.decoded) else None,
+        "is_adult": is_adult,
     }

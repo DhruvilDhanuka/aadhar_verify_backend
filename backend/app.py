@@ -10,7 +10,7 @@ immediately deleted. No PII is logged or persisted.
 
 from __future__ import annotations
 import shutil
-from db import add,exists,col,norm
+# from db import add,exists,col,norm  # Skipped for testing - uncomment to restore DB / email check
 from pydantic import BaseModel, EmailStr
 
 
@@ -93,10 +93,20 @@ def signed_by_uidai(pdf_bytes: bytes, passwords: list[str]) -> bool:
             )
     for sig in r.embedded_signatures:
         cert = sig.signer_cert
-        if "uidai.net.in" in cert.subject.human_friendly.lower():
+        DOMAINS = ("uidai.net.in", "uidai.gov.in")
+
+
+        print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.subject.human_friendly.lower())
+        print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.dump().lower())
+
+        subject = cert.subject.human_friendly.lower()
+        dump = cert.dump().lower()
+        
+        if any(d in subject for d in DOMAINS):
             return True
-        if b"uidai.net.in" in cert.dump().lower():   # fallback: email not in subject
+        if any(d.encode() in dump for d in DOMAINS):
             return True
+
     return False
 
 
@@ -132,8 +142,10 @@ class EmailIn(BaseModel):
 
 @app.post("/emails/check")
 def check_email(body: EmailIn):
-    found = exists(body.email)
-    return {"exists": found}
+    # Skipped for testing without DB
+    return {"exists": True}
+    # found = exists(body.email)
+    # return {"exists": found}
 
 
 @app.post("/api/verify")
@@ -201,7 +213,7 @@ async def verify(
             except Exception:
                 extracted_text = ""
 
-            bitmap = first_page.render(scale=160 / 72, rotation=0)
+            bitmap = first_page.render(scale=220 / 72, rotation=0)
             # Convert directly to in-memory NumPy uint8 array (zero disk I/O)
             image_np = bitmap.to_numpy()
 
@@ -211,6 +223,8 @@ async def verify(
         finally:
             pdf_doc.close()
 
+
+        print("==========EXTRACTED TEXT LAYER FROM THE PDF ",extracted_text)
         # Step 3: QR scan + text pipeline on cropped card
         result = run_pipeline(
             image=target_image,
