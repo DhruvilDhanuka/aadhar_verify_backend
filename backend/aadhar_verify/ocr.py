@@ -194,7 +194,7 @@ def extract_name_from_ocr(ocr_text: str) -> str | None:
 
 
 def match_name_in_ocr(expected_name: str | None, ocr_text: str) -> bool:
-    """Strict name match against OCR text (checks full name above DOB first)."""
+    """Strict name match against OCR text with multi-line sliding window support."""
     if not expected_name or not ocr_text:
         return False
 
@@ -204,13 +204,36 @@ def match_name_in_ocr(expected_name: str | None, ocr_text: str) -> bool:
 
     # 1. Primary Aadhaar layout: English name line(s) directly above the DOB line
     card_name = extract_name_from_ocr(ocr_text)
-    if card_name:
-        return names_match(expected_name, card_name)
+    if card_name and names_match(expected_name, card_name):
+        return True
 
-    # 2. Fallback only if DOB line was not found: check if any line has all expected words
-    for line in ocr_text.splitlines():
-        line_words = normalize_name(line).split()
-        if len(line_words) == len(exp_words) and sorted(line_words) == sorted(exp_words):
+    # 2. Fallback: consecutive multi-line sliding window (handles names spanning 1, 2, or 3 lines even without DOB anchor)
+    lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
+
+    # Filter out non-name metadata patterns (Issue/Download dates, VID, UIDAI, Address, Gender)
+    meta_pattern = re.compile(
+        r"(?:issue|download|date|vid|uid|help|uidai|government|india|unique|identification|authority|male|female|address|near|dist|pin|s/o|d/o|w/o|c/o|\b\d{4}\b)",
+        re.IGNORECASE,
+    )
+
+    current_block = []
+    blocks = []
+    for line in lines:
+        has_alpha = bool(re.search(r"[a-zA-Z]", line))
+        is_meta = bool(meta_pattern.search(line))
+        if has_alpha and not is_meta:
+            current_block.append(line)
+        else:
+            if current_block:
+                blocks.append(current_block)
+                current_block = []
+    if current_block:
+        blocks.append(current_block)
+
+    for block in blocks:
+        block_text = " ".join(block)
+        cand_words = normalize_name(block_text).split()
+        if len(cand_words) == len(exp_words) and (cand_words == exp_words or sorted(cand_words) == sorted(exp_words)):
             return True
 
     return False

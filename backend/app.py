@@ -44,73 +44,120 @@ app.add_middleware(
 )
 
 
-def get_aadhaar_pdf_passwords(expected_name: str, expected_dob: str) -> list[str]:
+def get_aadhaar_pdf_passwords(expected_name: str, expected_dob: str, manual_password: str | None = None) -> list[str]:
     """
     Generate candidate UIDAI e-Aadhaar password.
+    If manual_password is provided by user, prioritize it first.
     Standard UIDAI rule: First 4 letters of name in CAPITAL + 4-digit Year of Birth.
     Spaces and non-letters are stripped (e.g. 'Om Prakash' -> 'OMPR' + '2000' -> 'OMPR2000').
     """
+    passwords = []
+    if manual_password and manual_password.strip():
+        pwd_clean = manual_password.strip()
+        passwords.append(pwd_clean)
+        if pwd_clean.upper() not in passwords:
+            passwords.append(pwd_clean.upper())
+
     clean_name = re.sub(r"[^A-Za-z]", "", expected_name).upper()
     yob_match = re.search(r"\b(19\d{2}|20\d{2})\b", expected_dob)
-    if not clean_name or not yob_match:
-        return []
+    if clean_name and yob_match:
+        auto_pwd = clean_name[:4] + yob_match.group(1)
+        if auto_pwd not in passwords:
+            passwords.append(auto_pwd)
 
-    year = yob_match.group(1)
-    return [clean_name[:4] + year]
+    return passwords
 
 
-def signed_by_uidai(pdf_bytes: bytes, passwords: list[str]) -> bool:
+def signed_by_uidai(pdf_bytes: bytes, passwords: list[str], has_manual_password: bool = False) -> bool:
     """Return True if the PDF carries a digital signature from UIDAI."""
     r = PdfFileReader(io.BytesIO(pdf_bytes))
     if r.encrypted:
         if not passwords:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "This e-Aadhaar PDF is password-protected. "
-                    "Please enter your Name and Date of Birth in the registration form "
-                    "so the document can be unlocked."
-                ),
+                detail={
+                    "code": "PASSWORD_REQUIRED",
+                    "message": (
+                        "This e-Aadhaar PDF is password-protected. "
+                        "Please enter your Name and Date of Birth in the registration form "
+                        "or provide your PDF password so the document can be unlocked."
+                    ),
+                },
             )
         decrypted = False
         for pwd in passwords:
             try:
-                r.decrypt(pwd)
-                decrypted = True
-                break
+                res = r.decrypt(pwd)
+                if getattr(res, 'status', None) and res.status.name != 'FAILED':
+                    decrypted = True
+                    break
+                elif res is None or (getattr(res, 'status', None) is None and res):
+                    decrypted = True
+                    break
             except Exception:
                 continue
         if not decrypted:
-            attempted_pwd = passwords[0]
+            if has_manual_password:
+                msg = (
+                    f"Unable to unlock password-protected e-Aadhaar PDF. "
+                    f"The password you entered ('{passwords[0]}') was incorrect. "
+                    f"Please re-check your PDF password and try again."
+                )
+            else:
+                attempted_pwd = passwords[0] if passwords else "FIRST4NAME+YYYY"
+                msg = (
+                    f"This e-Aadhaar PDF is password-protected. Automated unlock with '{attempted_pwd}' did not succeed. "
+                    f"Please enter your PDF password manually below to proceed."
+                )
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Unable to unlock password-protected e-Aadhaar PDF. "
-                    f"UIDAI e-Aadhaar password is the first 4 letters of your name in CAPITAL and your 4-digit Year of Birth (e.g., '{attempted_pwd}'). "
-                    f"The registration details you entered did not unlock this file. "
-                    f"Please verify your registration Name and Date of Birth match your official Aadhaar card and submit again."
-                ),
+                detail={
+                    "code": "PASSWORD_REQUIRED",
+                    "message": msg,
+                },
             )
-    for sig in r.embedded_signatures:
-        cert = sig.signer_cert
-        DOMAINS = ("uidai.net.in", "uidai.gov.in")
+    try:
+        for sig in r.embedded_signatures:
+            cert = sig.signer_cert
+            DOMAINS = ("uidai.net.in", "uidai.gov.in")
 
+            print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.subject.human_friendly.lower())
+            print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.dump().lower())
 
-        print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.subject.human_friendly.lower())
-        print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.dump().lower())
-
-        subject = cert.subject.human_friendly.lower()
-        dump = cert.dump().lower()
-        
-        if any(d in subject for d in DOMAINS):
-            return True
-        if any(d.encode() in dump for d in DOMAINS):
-            return True
+            subject = cert.subject.human_friendly.lower()
+            dump = cert.dump().lower()
+            
+            if any(d in subject for d in DOMAINS):
+                return True
+            if any(d.encode() in dump for d in DOMAINS):
+                return True
+    except Exception as e:
+        if "Authentication failed" in str(e) or "PdfKeyNotAvailable" in type(e).__name__:
+            if has_manual_password:
+                msg = (
+                    f"Unable to unlock password-protected e-Aadhaar PDF. "
+                    f"The password you entered ('{passwords[0]}') was incorrect. "
+                    f"Please re-check your PDF password and try again."
+                )
+            else:
+                attempted_pwd = passwords[0] if passwords else "FIRST4NAME+YYYY"
+                msg = (
+                    f"This e-Aadhaar PDF is password-protected. Automated unlock with '{attempted_pwd}' did not succeed. "
+                    f"Please enter your PDF password manually below to proceed."
+                )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PASSWORD_REQUIRED",
+                    "message": msg,
+                },
+            )
+        raise
 
     return False
 
 
-def open_pdf_document(pdf_input: str | bytes, passwords: list[str]) -> pdfium.PdfDocument:
+def open_pdf_document(pdf_input: str | bytes, passwords: list[str], has_manual_password: bool = False) -> pdfium.PdfDocument:
     """Open a PDF document. If password-protected, unlocks using candidate password."""
     # 1. Try opening without a password (for unencrypted / already unlocked PDFs)
     try:
@@ -133,6 +180,12 @@ def open_pdf_document(pdf_input: str | bytes, passwords: list[str]) -> pdfium.Pd
         except Exception:
             continue
 
+    if has_manual_password:
+        msg = f"Unable to decrypt the PDF document with password '{passwords[0]}'. Please check the password and try again."
+    else:
+        attempted_pwd = passwords[0] if passwords else "FIRST4NAME+YYYY"
+        msg = f"Unable to decrypt password-protected e-Aadhaar PDF with automated password '{attempted_pwd}'. Please enter the PDF password manually below."
+
     raise HTTPException(
         status_code=400, detail="Unable to open or decrypt the PDF document.")
 
@@ -153,6 +206,7 @@ async def verify(
     aadhaar_image: UploadFile = File(...),
     expected_name: str = Form(""),
     expected_dob: str = Form(""),
+    password: str = Form(""),
 ):
     """
     Verify an Aadhaar card PDF
@@ -177,11 +231,17 @@ async def verify(
         raise HTTPException(
             status_code=400, detail="File too large. Max 5 MB.")
 
+    manual_pwd = password.strip() if password and password.strip() else None
+    has_manual_pwd = manual_pwd is not None
+    passwords = get_aadhaar_pdf_passwords(
+        expected_name.strip(),
+        expected_dob.strip(),
+        manual_password=manual_pwd,
+    )
+
     try:
         # Step 1: Verify UIDAI digital signature (purely in-memory)
-        passwords = get_aadhaar_pdf_passwords(
-            expected_name.strip(), expected_dob.strip())
-        if not signed_by_uidai(file_bytes, passwords):
+        if not signed_by_uidai(file_bytes, passwords, has_manual_password=has_manual_pwd):
             raise HTTPException(status_code=400, detail=(
                 "PDF is not signed by UIDAI. Only genuine Aadhaar PDFs from "
                 "UIDAI / DigiLocker / mAadhaar are accepted."
@@ -191,6 +251,7 @@ async def verify(
         pdf_doc = open_pdf_document(
             pdf_input=file_bytes,
             passwords=passwords,
+            has_manual_password=has_manual_pwd,
         )
 
         try:
@@ -235,6 +296,26 @@ async def verify(
     except HTTPException:
         raise
     except Exception as e:
+        if "Authentication failed" in str(e):
+            if has_manual_pwd:
+                msg = (
+                    f"Unable to unlock password-protected e-Aadhaar PDF. "
+                    f"The password you entered ('{passwords[0]}') was incorrect. "
+                    f"Please re-check your PDF password and try again."
+                )
+            else:
+                attempted_pwd = passwords[0] if passwords else "FIRST4NAME+YYYY"
+                msg = (
+                    f"This e-Aadhaar PDF is password-protected. Automated unlock with '{attempted_pwd}' did not succeed. "
+                    f"Please enter your PDF password manually below to proceed."
+                )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PASSWORD_REQUIRED",
+                    "message": msg,
+                },
+            )
         raise HTTPException(
             status_code=500, detail=f"Verification failed: {e}")
 
