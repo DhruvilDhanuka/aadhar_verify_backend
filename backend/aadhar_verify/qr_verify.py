@@ -166,11 +166,6 @@ def _decode_secure_qr(numeric_payload: str) -> dict:
 def check_qr(image: str | np.ndarray) -> QrResult:
     """Detect and decode UIDAI QR demographics from a rendered document page or in-memory NumPy array."""
     qr_payload = _locate_qr_payload(image)
-    os.makedirs("output", exist_ok=True)
-    ok = cv2.imwrite("output/qr_page.png", image)
-    print(ok)  # False means it didn't save
-
-    
     if not qr_payload:
         print("=============NOT FOUND QR==============")
         return QrResult(decoded=False, fields={})

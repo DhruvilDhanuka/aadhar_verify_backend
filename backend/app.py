@@ -46,24 +46,55 @@ app.add_middleware(
 
 def get_aadhaar_pdf_passwords(expected_name: str, expected_dob: str, manual_password: str | None = None) -> list[str]:
     """
-    Generate candidate UIDAI e-Aadhaar password.
+    Generate candidate UIDAI e-Aadhaar passwords.
     If manual_password is provided by user, prioritize it first.
     Standard UIDAI rule: First 4 letters of name in CAPITAL + 4-digit Year of Birth.
-    Spaces and non-letters are stripped (e.g. 'Om Prakash' -> 'OMPR' + '2000' -> 'OMPR2000').
+    Also handles short names (e.g. 'Om', 'Ali'), titles (e.g. 'Mr.', 'Dr.'), and order variations.
     """
     passwords = []
     if manual_password and manual_password.strip():
         pwd_clean = manual_password.strip()
         passwords.append(pwd_clean)
+        # Also try without internal spaces
+        no_space = pwd_clean.replace(" ", "")
+        if no_space not in passwords:
+            passwords.append(no_space)
         if pwd_clean.upper() not in passwords:
             passwords.append(pwd_clean.upper())
+        if no_space.upper() not in passwords:
+            passwords.append(no_space.upper())
 
-    clean_name = re.sub(r"[^A-Za-z]", "", expected_name).upper()
     yob_match = re.search(r"\b(19\d{2}|20\d{2})\b", expected_dob)
-    if clean_name and yob_match:
-        auto_pwd = clean_name[:4] + yob_match.group(1)
-        if auto_pwd not in passwords:
-            passwords.append(auto_pwd)
+    if yob_match:
+        yob = yob_match.group(1)
+
+        # 1. Cleaned full name without non-alphabetic chars
+        clean_name = re.sub(r"[^A-Za-z]", "", expected_name).upper()
+        if clean_name:
+            pwd = clean_name[:4] + yob
+            if pwd not in passwords:
+                passwords.append(pwd)
+
+        # 2. Strip titles (Mr., Ms., Dr., Shri, etc.) and try first name
+        no_title = re.sub(r"\b(mr|ms|mrs|shri|smt|dr|master|miss)\b\.?", "", expected_name, flags=re.IGNORECASE).strip()
+        words = [w for w in re.sub(r"[^A-Za-z\s]", "", no_title).upper().split() if w]
+        if words:
+            # First name >= 4 chars
+            first_name = words[0]
+            if len(first_name) >= 4:
+                pwd_fn = first_name[:4] + yob
+                if pwd_fn not in passwords:
+                    passwords.append(pwd_fn)
+            else:
+                # Short first name: e.g. "Om" -> "OM2004" as well as "OMSH2004"
+                pwd_short = first_name + yob
+                if pwd_short not in passwords:
+                    passwords.append(pwd_short)
+                # First name + letters of next word
+                combined = "".join(words)
+                pwd_comb = combined[:4] + yob
+                if pwd_comb not in passwords:
+                    passwords.append(pwd_comb)
 
     return passwords
 
@@ -119,10 +150,24 @@ def signed_by_uidai(pdf_bytes: bytes, passwords: list[str], has_manual_password:
     try:
         for sig in r.embedded_signatures:
             cert = sig.signer_cert
-            DOMAINS = ("uidai.net.in", "uidai.gov.in")
-
-            print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.subject.human_friendly.lower())
-            print("THE SIGNATURE THAT WE ARE TRYING TO MATCH: ===================/n",cert.dump().lower())
+            DOMAINS = (
+                "uidai.net.in",
+                "uidai.gov.in",
+                "digilocker.gov.in",
+                "negd.gov.in",
+                "nic.in",
+                "meity.gov.in",
+                "cca.gov.in",
+            )
+            ORGS = (
+                "unique identification authority of india",
+                "uidai",
+                "digilocker",
+                "national e-governance division",
+                "negd",
+                "ministry of electronics and information technology",
+                "national informatics centre",
+            )
 
             subject = cert.subject.human_friendly.lower()
             dump = cert.dump().lower()
@@ -130,6 +175,10 @@ def signed_by_uidai(pdf_bytes: bytes, passwords: list[str], has_manual_password:
             if any(d in subject for d in DOMAINS):
                 return True
             if any(d.encode() in dump for d in DOMAINS):
+                return True
+            if any(o in subject for o in ORGS):
+                return True
+            if any(o.encode() in dump for o in ORGS):
                 return True
     except Exception as e:
         if "Authentication failed" in str(e) or "PdfKeyNotAvailable" in type(e).__name__:
@@ -184,10 +233,15 @@ def open_pdf_document(pdf_input: str | bytes, passwords: list[str], has_manual_p
         msg = f"Unable to decrypt the PDF document with password '{passwords[0]}'. Please check the password and try again."
     else:
         attempted_pwd = passwords[0] if passwords else "FIRST4NAME+YYYY"
-        msg = f"Unable to decrypt password-protected e-Aadhaar PDF with automated password '{attempted_pwd}'. Please enter the PDF password manually below."
+        msg = f"This e-Aadhaar PDF is password-protected. Automated unlock with '{attempted_pwd}' did not succeed. Please enter your PDF password manually below."
 
     raise HTTPException(
-        status_code=400, detail="Unable to open or decrypt the PDF document.")
+        status_code=400,
+        detail={
+            "code": "PASSWORD_REQUIRED",
+            "message": msg,
+        },
+    )
 
 
 class EmailIn(BaseModel):
@@ -240,11 +294,11 @@ async def verify(
     )
 
     try:
-        # Step 1: Verify UIDAI digital signature (purely in-memory)
+        # Step 1: Verify UIDAI / DigiLocker digital signature (purely in-memory)
         if not signed_by_uidai(file_bytes, passwords, has_manual_password=has_manual_pwd):
             raise HTTPException(status_code=400, detail=(
-                "PDF is not signed by UIDAI. Only genuine Aadhaar PDFs from "
-                "UIDAI / DigiLocker / mAadhaar are accepted."
+                "PDF is not digitally signed by UIDAI or DigiLocker / Government of India. "
+                "Only genuine e-Aadhaar PDFs are accepted."
             ))
 
         # Step 2: Render first page directly to NumPy array in memory and extract embedded text
@@ -262,30 +316,33 @@ async def verify(
             w, h = first_page.get_size()
 
             # Fast text extraction: crop to bottom cut-out wallet card area (standard portrait e-Aadhaar A4)
-            # In PDF coordinates, (0,0) is bottom-left, so bottom card is [0, 0, w, h * 0.35]
+            # In PDF coordinates, (0,0) is bottom-left, so bottom card (40% height) is [0, 0, w, h * 0.40]
+            full_text = ""
             try:
                 textpage = first_page.get_textpage()
+                full_text = textpage.get_text_range()
                 if h > w:
-                    extracted_text = textpage.get_text_bounded(left=0, bottom=0, right=w, top=h * 0.35)
+                    extracted_text = textpage.get_text_bounded(left=0, bottom=0, right=w, top=h * 0.40)
                 else:
-                    extracted_text = textpage.get_text_range()
+                    extracted_text = full_text
                 if not extracted_text.strip():
-                    extracted_text = textpage.get_text_range()
+                    extracted_text = full_text
             except Exception:
                 extracted_text = ""
+                full_text = ""
 
             bitmap = first_page.render(scale=220 / 72, rotation=0)
             # Convert directly to in-memory NumPy uint8 array (zero disk I/O)
             image_np = bitmap.to_numpy()
 
-            # Crop image to lower cut-out card portion (standard portrait e-Aadhaar) for QR scan
+            # Crop image to lower cut-out card portion (starting from 60% of height) for QR scan
             img_h, img_w = image_np.shape[:2]
-            target_image = image_np[int(img_h * 0.65):, :] if img_h > img_w else image_np
+            target_image = image_np[int(img_h * 0.60):, :] if img_h > img_w else image_np
         finally:
             pdf_doc.close()
 
 
-        print("==========EXTRACTED TEXT LAYER FROM THE PDF ",extracted_text)
+        print("==========EXTRACTED TEXT LAYER FROM THE PDF ", extracted_text)
         # Step 3: QR scan + text pipeline on cropped card
         result = run_pipeline(
             image=target_image,
@@ -293,10 +350,27 @@ async def verify(
             expected_dob=expected_dob.strip() or None,
             pdf_text=extracted_text,
         )
+
+        # Fallback: If cropped image didn't verify, retry with full page
+        if result.get("verdict") != "PASS" and target_image.shape != image_np.shape:
+            fallback_res = run_pipeline(
+                image=image_np,
+                expected_name=expected_name.strip() or None,
+                expected_dob=expected_dob.strip() or None,
+                pdf_text=full_text or extracted_text,
+            )
+            if fallback_res.get("verdict") == "PASS":
+                result = fallback_res
     except HTTPException:
         raise
     except Exception as e:
-        if "Authentication failed" in str(e):
+        err_msg = str(e).lower()
+        if (
+            "authentication failed" in err_msg
+            or "incorrect password" in err_msg
+            or "password" in err_msg
+            or "pdfkeynotavailable" in type(e).__name__.lower()
+        ):
             if has_manual_pwd:
                 msg = (
                     f"Unable to unlock password-protected e-Aadhaar PDF. "

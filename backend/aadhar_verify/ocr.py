@@ -13,7 +13,7 @@ import numpy as np
 
 
 DOB_RE_f1 = re.compile(r"\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b")
-DOB_RE_f2 = re.compile(r"\b((?:19|20-)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")
+DOB_RE_f2 = re.compile(r"\b((?:19|20)\d{2}[/\-.](?:0[1-9]|1[0-2])[/\-.](?:0[1-9]|[12]\d|3[01]))\b")
 YOB_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 # DOB-specific prefixes (DOB, D.O.B, Date of Birth, जन्म, जम)
@@ -122,6 +122,7 @@ def extract_ocr(pdf_text: str | None = None, image: str | np.ndarray | None = No
         line for line in raw_text.splitlines()
         if not re.search(r"(?:issue|download)\s*date", line, re.IGNORECASE)
     ]
+
     filtered_text = "\n".join(clean_lines)
 
     # 1. Look for labeled DOB first (highest confidence)
