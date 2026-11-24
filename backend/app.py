@@ -421,7 +421,7 @@ async def verify(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     if len(file_bytes) > 5 * 1024 * 1024:  # 5 MB limit
         raise HTTPException(
-            status_code=400, de-*tail="File too large. Max 5 MB.")
+            status_code=400, detail="File too large. Max 5 MB.")
 
     manual_pwd = password.strip() if password and password.strip() else None
 
