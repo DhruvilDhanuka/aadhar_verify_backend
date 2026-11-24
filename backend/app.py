@@ -43,8 +43,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://aadhar-verify-frontend-r2l4c7tf3-dhruvil-codes.vercel.app", "https://aadhar-verify-frontend.vercel.app",
-                   "http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["POST"],
+                   "http://localhost:5173", "http://127.0.0.1:5173",
+                   "http://localhost:5174", "http://127.0.0.1:5174"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -126,7 +127,13 @@ def get_aadhaar_pdf_passwords(expected_name: str, expected_dob: str, manual_pass
 
 def signed_by_uidai(pdf_bytes: bytes, passwords: list[str], has_manual_password: bool = False) -> bool:
     """Return True if the PDF carries a digital signature from UIDAI."""
-    r = PdfFileReader(io.BytesIO(pdf_bytes))
+    try:
+        r = PdfFileReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is corrupt or not a valid PDF document. Please upload a genuine e-Aadhaar PDF.",
+        )
     if r.encrypted:
         if not passwords:
             raise HTTPException(
@@ -326,6 +333,7 @@ def process_aadhaar_bytes(
                 bitmap = first_page.render(scale=200 / 72, rotation=0)
             target_image = bitmap.to_numpy()
         finally:
+            del bitmap
             pdf_doc.close()
 
         # Step 3: QR scan + text pipeline on cropped card
@@ -356,6 +364,7 @@ def process_aadhaar_bytes(
                 del fb_bitmap
                 fallback_doc.close()
 
+        del target_image
         return result
 
     except HTTPException:
@@ -388,9 +397,6 @@ def process_aadhaar_bytes(
                 },
             )
         raise HTTPException(status_code=500, detail=f"Verification failed: {e}")
-    finally:
-        del bitmap
-        del target_image
 
 
 @app.post("/api/verify")
