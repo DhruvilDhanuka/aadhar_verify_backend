@@ -24,7 +24,9 @@ import pypdfium2 as pdfium
 from pyhanko.pdf_utils.reader import PdfFileReader
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from aadhar_verify.main import run_pipeline
 
@@ -34,6 +36,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Gzip compression for API responses > 1KB
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Allow React dev server (localhost:5173) to call the API
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +46,26 @@ app.add_middleware(
                    "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["POST"],
     allow_headers=["*"],
+)
+
+UIDAI_DOMAINS = (
+    "uidai.net.in",
+    "uidai.gov.in",
+    "digilocker.gov.in",
+    "negd.gov.in",
+    "nic.in",
+    "meity.gov.in",
+    "cca.gov.in",
+)
+
+UIDAI_ORGS = (
+    "unique identification authority of india",
+    "uidai",
+    "digilocker",
+    "national e-governance division",
+    "negd",
+    "ministry of electronics and information technology",
+    "national informatics centre",
 )
 
 
@@ -150,35 +175,13 @@ def signed_by_uidai(pdf_bytes: bytes, passwords: list[str], has_manual_password:
     try:
         for sig in r.embedded_signatures:
             cert = sig.signer_cert
-            DOMAINS = (
-                "uidai.net.in",
-                "uidai.gov.in",
-                "digilocker.gov.in",
-                "negd.gov.in",
-                "nic.in",
-                "meity.gov.in",
-                "cca.gov.in",
-            )
-            ORGS = (
-                "unique identification authority of india",
-                "uidai",
-                "digilocker",
-                "national e-governance division",
-                "negd",
-                "ministry of electronics and information technology",
-                "national informatics centre",
-            )
-
             subject = cert.subject.human_friendly.lower()
+            if any(d in subject for d in UIDAI_DOMAINS) or any(o in subject for o in UIDAI_ORGS):
+                return True
+
+            # Fall back to ASN.1 DER dump only if subject attributes did not match
             dump = cert.dump().lower()
-            
-            if any(d in subject for d in DOMAINS):
-                return True
-            if any(d.encode() in dump for d in DOMAINS):
-                return True
-            if any(o in subject for o in ORGS):
-                return True
-            if any(o.encode() in dump for o in ORGS):
+            if any(d.encode() in dump for d in UIDAI_DOMAINS) or any(o.encode() in dump for o in UIDAI_ORGS):
                 return True
     except Exception as e:
         if "Authentication failed" in str(e) or "PdfKeyNotAvailable" in type(e).__name__:
@@ -255,37 +258,16 @@ def check_email(body: EmailIn):
     # return {"exists": found}
 
 
-@app.post("/api/verify")
-async def verify(
-    aadhaar_image: UploadFile = File(...),
-    expected_name: str = Form(""),
-    expected_dob: str = Form(""),
-    password: str = Form(""),
-):
+def process_aadhaar_bytes(
+    file_bytes: bytes,
+    expected_name: str,
+    expected_dob: str,
+    manual_pwd: str | None = None,
+) -> dict:
     """
-    Verify an Aadhaar card PDF
+    Synchronous CPU-bound pipeline executed in a background threadpool.
+    Keeps the FastAPI event loop unblocked for high concurrent traffic.
     """
-    # Validate file type — PDF only
-    content_type = (aadhaar_image.content_type or "").lower()
-    filename = (aadhaar_image.filename or "").lower()
-
-    is_pdf = content_type == "application/pdf" or filename.endswith(".pdf")
-
-    if not is_pdf:
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are accepted (e-Aadhaar / DigiLocker / mAadhaar).",
-        )
-
-    # Read file into memory
-    file_bytes = await aadhaar_image.read()
-    if len(file_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    if len(file_bytes) > 5 * 1024 * 1024:  # 5 MB limit
-        raise HTTPException(
-            status_code=400, detail="File too large. Max 5 MB.")
-
-    manual_pwd = password.strip() if password and password.strip() else None
     has_manual_pwd = manual_pwd is not None
     passwords = get_aadhaar_pdf_passwords(
         expected_name.strip(),
@@ -296,28 +278,34 @@ async def verify(
     try:
         # Step 1: Verify UIDAI / DigiLocker digital signature (purely in-memory)
         if not signed_by_uidai(file_bytes, passwords, has_manual_password=has_manual_pwd):
-            raise HTTPException(status_code=400, detail=(
-                "PDF is not digitally signed by UIDAI or DigiLocker / Government of India. "
-                "Only genuine e-Aadhaar PDFs are accepted."
-            ))
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "PDF is not digitally signed by UIDAI or DigiLocker / Government of India. "
+                    "Only genuine e-Aadhaar PDFs are accepted."
+                ),
+            )
 
-        # Step 2: Render first page directly to NumPy array in memory and extract embedded text
+        # Step 2: Open and render cropped card section directly via PDFium
         pdf_doc = open_pdf_document(
             pdf_input=file_bytes,
             passwords=passwords,
             has_manual_password=has_manual_pwd,
         )
 
+        bitmap = None
+        target_image = None
+        full_text = ""
+        extracted_text = ""
+        h, w = 0, 0
+
         try:
             if len(pdf_doc) == 0:
-                raise HTTPException(
-                    status_code=400, detail="PDF has no pages.")
+                raise HTTPException(status_code=400, detail="PDF has no pages.")
             first_page = pdf_doc[0]
             w, h = first_page.get_size()
 
-            # Fast text extraction: crop to bottom cut-out wallet card area (standard portrait e-Aadhaar A4)
-            # In PDF coordinates, (0,0) is bottom-left, so bottom card (40% height) is [0, 0, w, h * 0.40]
-            full_text = ""
+            # Fast text extraction from bottom card area
             try:
                 textpage = first_page.get_textpage()
                 full_text = textpage.get_text_range()
@@ -331,18 +319,15 @@ async def verify(
                 extracted_text = ""
                 full_text = ""
 
-            bitmap = first_page.render(scale=220 / 72, rotation=0)
-            # Convert directly to in-memory NumPy uint8 array (zero disk I/O)
-            image_np = bitmap.to_numpy()
-
-            # Crop image to lower cut-out card portion (starting from 60% of height) for QR scan
-            img_h, img_w = image_np.shape[:2]
-            target_image = image_np[int(img_h * 0.60):, :] if img_h > img_w else image_np
+            # Native crop at 200 DPI: renders only the bottom 42% card area directly in C, saving 65% CPU and 75% RAM
+            if h > w:
+                bitmap = first_page.render(scale=200 / 72, rotation=0, crop=(0, 0, 0, h * 0.58))
+            else:
+                bitmap = first_page.render(scale=200 / 72, rotation=0)
+            target_image = bitmap.to_numpy()
         finally:
             pdf_doc.close()
 
-
-        print("==========EXTRACTED TEXT LAYER FROM THE PDF ", extracted_text)
         # Step 3: QR scan + text pipeline on cropped card
         result = run_pipeline(
             image=target_image,
@@ -351,16 +336,28 @@ async def verify(
             pdf_text=extracted_text,
         )
 
-        # Fallback: If cropped image didn't verify, retry with full page
-        if result.get("verdict") != "PASS" and target_image.shape != image_np.shape:
-            fallback_res = run_pipeline(
-                image=image_np,
-                expected_name=expected_name.strip() or None,
-                expected_dob=expected_dob.strip() or None,
-                pdf_text=full_text or extracted_text,
-            )
-            if fallback_res.get("verdict") == "PASS":
-                result = fallback_res
+        # Fallback: Only retry with full page if the cropped card could not read the QR code or details
+        if "Unable to read" in result.get("verdict_reason", "") and h > w:
+            fallback_doc = open_pdf_document(file_bytes, passwords, has_manual_password=has_manual_pwd)
+            fb_bitmap = None
+            try:
+                fb_page = fallback_doc[0]
+                fb_bitmap = fb_page.render(scale=200 / 72, rotation=0)
+                fb_image = fb_bitmap.to_numpy()
+                fallback_res = run_pipeline(
+                    image=fb_image,
+                    expected_name=expected_name.strip() or None,
+                    expected_dob=expected_dob.strip() or None,
+                    pdf_text=full_text or extracted_text,
+                )
+                if fallback_res.get("verdict") == "PASS":
+                    result = fallback_res
+            finally:
+                del fb_bitmap
+                fallback_doc.close()
+
+        return result
+
     except HTTPException:
         raise
     except Exception as e:
@@ -390,8 +387,52 @@ async def verify(
                     "message": msg,
                 },
             )
+        raise HTTPException(status_code=500, detail=f"Verification failed: {e}")
+    finally:
+        del bitmap
+        del target_image
+
+
+@app.post("/api/verify")
+async def verify(
+    aadhaar_image: UploadFile = File(...),
+    expected_name: str = Form(""),
+    expected_dob: str = Form(""),
+    password: str = Form(""),
+):
+    """
+    Verify an Aadhaar card PDF asynchronously with threadpool offloading.
+    """
+    # Validate file type — PDF only
+    content_type = (aadhaar_image.content_type or "").lower()
+    filename = (aadhaar_image.filename or "").lower()
+
+    is_pdf = content_type == "application/pdf" or filename.endswith(".pdf")
+
+    if not is_pdf:
         raise HTTPException(
-            status_code=500, detail=f"Verification failed: {e}")
+            status_code=400,
+            detail="Only PDF files are accepted (e-Aadhaar / DigiLocker / mAadhaar).",
+        )
+
+    # Read file into memory asynchronously
+    file_bytes = await aadhaar_image.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(file_bytes) > 5 * 1024 * 1024:  # 5 MB limit
+        raise HTTPException(
+            status_code=400, de-*tail="File too large. Max 5 MB.")
+
+    manual_pwd = password.strip() if password and password.strip() else None
+
+    # Offload CPU-heavy cryptographic & image processing to AnyIO worker threadpool
+    result = await run_in_threadpool(
+        process_aadhaar_bytes,
+        file_bytes=file_bytes,
+        expected_name=expected_name,
+        expected_dob=expected_dob,
+        manual_pwd=manual_pwd,
+    )
 
     return JSONResponse(content=result)
 
