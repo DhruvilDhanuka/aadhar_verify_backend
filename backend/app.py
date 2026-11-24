@@ -13,6 +13,8 @@ import shutil
 # from db import add,exists,col,norm  # Skipped for testing - uncomment to restore DB / email check
 from pydantic import BaseModel, EmailStr
 
+from notifications.router import router as whatsapp_router
+
 
 import tempfile
 import os
@@ -48,6 +50,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(whatsapp_router)
 
 UIDAI_DOMAINS = (
     "uidai.net.in",
@@ -450,3 +454,6 @@ async def health():
         "tesseract": shutil.which("tesseract") is not None,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+
